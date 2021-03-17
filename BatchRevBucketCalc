@@ -1,0 +1,439 @@
+public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.Stateful{
+    
+    public Set<Id> oppIds;
+    public Set<Id> renewalExpOppIds = new Set<Id>();
+    public Set<Id> renewalExpOppLineItems = new Set<Id>();
+    public List<String> errorLog = new List<String>();
+    public String batchQuery;
+    
+    public BatchRevBucketCalc(Set<Id> oppIds){
+        this.batchQuery = '';
+        this.oppIds = oppIds;
+    }
+    
+    public BatchRevBucketCalc(String batchQuery){
+        this.batchQuery = batchQuery;
+        this.oppIds = new Set<Id>();
+    }
+    
+    
+    // Before executing, make sure Super Account is on the account
+    public Database.QueryLocator start(Database.BatchableContext BC){
+        
+        String query = 'SELECT Id, AccountId, OwnerId, Account.SuperAccount__c FROM Opportunity WHERE Id IN :oppIds';
+        
+        Database.QueryLocator qL = batchQuery == '' && oppIds.size() > 0 ? Database.getQueryLocator(query) : Database.getQueryLocator(batchQuery);
+        
+        return qL;
+    }
+    
+    
+    // Get all of the opportunity products that are related to super accounts.
+    // Iterate through each and if there is a gap between two dates
+    
+    // Query all opportunity products related to a super account and sort by start date
+    // As you iterate through each make a Map for Super Account, Account, and Account Product
+    // The Super Account will be used to find New Hierarchy
+    // The Account will be used to find Site Expansion
+    // The AccountProduct will be used to find Cross Sell and Up Sell
+    
+    /* Query for getting opportunity Products with superAccounts
+* 
+* Considerations:
+* + Must Account for Pear Deck
+*   - Pear Deck Opportunity Products should only couunt towards an accounts first booking date or active date if they start after Jan 1
+*   - Run a separate deal Pear Deck on it's own
+*   - Both GG and Pear Deck should only be counted as cross sell if someone purchased GG before
+*   
+* + Exclude Pilots
+*   - Excluding Opportunities with Amount <= 1
+* + Account for Active Date for 379
+*/
+    
+    public static Map<String,Map<String, Date>> getRevDates(Map<String,List<List<Date>>> dateMap){
+        Map<String,Map<String, Date>> resultMap = new Map<String,Map<String, Date>>();
+        for(String key : dateMap.keySet()){
+            List<List<Date>> contracts = dateMap.get(key);
+            Date firstBookingDate = null;
+            Date maxEndDate = null;
+            Date activeDate = null;
+            for(Integer i = 0 ; i < contracts.size(); i++){
+                List<Date> dates = contracts[i];
+                Date startDate = dates[0];
+                Date endDate = dates[1];
+                Date minDate = dates[2];
+                if(i == 0){
+                    firstBookingDate = startDate;
+                    maxEndDate = endDate;
+                    activeDate = minDate;
+                }
+                else {
+                    if(startDate > maxEndDate + 365){
+                        firstBookingDate = startDate;
+                    }
+                    if(activeDate > maxEndDate + 365){
+                        activeDate = minDate;
+                    }
+                    if(endDate > maxEndDate){
+                        maxEndDate = endDate;
+                    }
+                }
+                
+            }
+            resultMap.put(key,new Map<String, Date>{
+                'FBD' => firstBookingDate,
+                    'MED' => maxEndDate,
+                    'AD' => activeDate
+                    });
+        }
+        return resultMap;
+    }
+    
+    public static Decimal getTermFromDates(Date startDate, Date endDate){
+        
+        Integer yearEnd = endDate.year();
+        Integer yearStart = startDate.year();
+        
+        Integer midTerm = yearEnd > yearStart ? yearEnd - yearStart - 1 : 0;
+        
+        // Get days from start til end of year adjust for leap year
+        Integer rawDaysStartYr = startDate.daysBetween(Date.newInstance(yearStart,12,31));
+        Integer adjustedDaysStartYr = startDate < Date.newInstance(yearStart,3,1) && Date.isLeapYear(yearStart) ? rawDaysStartYr - 1 : rawDaysStartYr;
+        
+        Integer rawDaysEndYr = endDate.dayOfYear();
+        Integer adjustedDaysEndYr = endDate >= Date.newInstance(yearEnd,3,1) && Date.isLeapYear(yearEnd) ? rawDaysEndYr - 1 : rawDaysEndYr;
+        
+        Decimal rawSum = (Decimal.valueOf(adjustedDaysStartYr) + Decimal.valueOf(adjustedDaysEndYr));
+        Decimal adjustedSum = yearEnd == yearStart ? rawSum - 365 : rawSum;
+                
+        Decimal term = midTerm +  adjustedSum/364;
+        
+        return term;
+    }
+    
+    public static Map<String,Revenue_Bucket__c> updateRevBucketMap(Map<String,Revenue_Bucket__c> revBucketMap, OpportunityLineItem oli,String revType,Decimal arr,Decimal acv){
+        
+        // Assuming that revType is in the rev bucket type picklist... add some validation to check that
+        String oppId = String.valueOf(oli.OpportunityId);
+        String productId = String.valueOf(oli.Product2Id);
+        Date closeDate = oli.Opportunity.CloseDate;
+        String revBucketKey = oppId + productId + revType;
+        Revenue_Bucket__c revBucket = revBucketMap.containsKey(revBucketKey) ? revBucketMap.get(revBucketKey) : new Revenue_Bucket__c(Primary__c=True,
+                                                                                                                                      Type__c=revType,
+                                                                                                                                      Opportunity_Owner__c=oli.Opportunity.OwnerId,
+                                                                                                                                      Opportunity__c=oppId,
+                                                                                                                                      Product__c=productId,
+                                                                                                                                      Date__c=closeDate);
+        Decimal currArr = revBucket.ARR__c == Null ? 0 : revBucket.ARR__c;
+        currArr += arr;
+        Decimal currAcv = revBucket.ACV__c == Null ? 0 : revBucket.ACV__c;
+        currAcv += acv;
+        revBucket.ARR__c = currArr;
+        revBucket.ACV__c = currAcv;
+        revBucketMap.put(revBucketKey,revBucket);
+        
+        
+        return revBucketMap;
+    }
+    
+    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, OpportunityLineItem oli){
+        Map<String, Object> returnMap = new Map<String,Object>();
+        
+        // Determine revenue type based on inclusive 30 day window after first booking dates
+        String superId = String.valueOf(oli.Opportunity.Account.SuperAccount__c);
+        String productId = String.valueOf(oli.Product2Id);
+        String superProductId = superId + productId;
+        String accountId = String.valueOf(oli.Opportunity.AccountId);
+        String oppId = String.valueOf(oli.OpportunityId);
+        Date startDate = oli.ServiceDate;
+        Date endDate = oli.ServiceEndDate__c;
+        Date closeDate = oli.Opportunity.CloseDate;
+        
+        if(startDate == Null){
+            startDate = closeDate;
+            endDate = startDate.addYears(1) - 1;
+        }
+        if(endDate == Null){
+            endDate = startDate.addYears(1) - 1;
+        }
+        
+        // Calculate arr
+        Decimal term = getTermFromDates(startDate,endDate);
+        Decimal arr = oli.TotalPrice / term;            
+        // Calculate oli ACV
+        Decimal acv = term < 1 ? oli.TotalPrice : arr;
+
+        String revType = '';
+        if(!superResultMap.containsKey(superId)){
+            revType = 'New';
+        }
+        else if(startDate <= superResultMap.get(superId).get('FBD').addDays(30)){
+            revType = 'New';
+        }
+        else if(!superProductResultMap.containsKey(superProductId)){
+            revType = 'Cross Sell';
+            Id upSellProductId = oli.Product2.Up_Sell_Product__c;
+            if(upSellProductId != Null && superProductResultMap.containsKey(superId + String.valueOf(upSellProductId))){
+                if(startDate > superProductResultMap.get(superId + String.valueOf(upSellProductId)).get('FBD').addDays(30)){
+                    revType = 'Up Sell';
+                }
+            }
+        }
+        else if(startDate <= superProductResultMap.get(superProductId).get('FBD').addDays(30)){
+            revType = 'Cross Sell';
+            Id upSellProductId = oli.Product2.Up_Sell_Product__c;
+            if(upSellProductId != Null && superProductResultMap.containsKey(superId + String.valueOf(upSellProductId))){
+                if(startDate > superProductResultMap.get(superId + String.valueOf(upSellProductId)).get('FBD').addDays(30)){
+                    revType = 'Up Sell';
+                }
+            }
+        }
+        else if(!accountResultMap.containsKey(accountId)){
+            revType = 'Site Expansion';
+        }
+        else if(startDate <= accountResultMap.get(accountId).get('FBD').addDays(30)){
+            revType = 'Site Expansion';
+        }
+        else{
+			// Queue for Renewal/Expansion Calcs
+            returnMap.put('RenExp',oppId);
+            returnMap.put('RenExpLineItem',oli.Id);
+        }
+        
+		if(revType != ''){
+			revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv);
+        }
+        returnMap.put('RevBuckets',revBucketMap);
+        return returnMap;            
+    }
+    
+    
+    public void execute(Database.BatchableContext BC, List<Opportunity> opps){
+        
+        
+        try{
+            System.debug('Start CPU Time: '+Limits.getCpuTime());
+            
+            Map<Id,Opportunity> oppMap = new Map<Id,Opportunity>(opps);
+            
+            Set<Id> superAccountIds = new Set<Id>();
+            Set<Id> accountIds = new Set<Id>();
+            
+            for(Opportunity opp : opps){
+                superAccountIds.add(opp.Account.SuperAccount__c);
+                accountIds.add(opp.AccountId);
+            }
+            
+            
+            // Exclude Pear Deck before 2021 
+            // Subscription Pricing "Fixed Price" ensures there are dates on the opportunity product
+            // How to account for previous first booking dates. For historical alignment, would it be possible to use an earlier first booking date.
+            // How to handle situation where first booking date > service date :(
+            Date pearDeckCutOverDate = Date.newInstance(2021, 1, 1);
+            
+            List<OpportunityLineItem> lineItems = [SELECT Opportunity.CloseDate, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, Product2Id, 
+                                                   ServiceDate, ServiceEndDate__c, Product2.Family, Opportunity.Credited_Opportunity__r.CloseDate
+                                                   FROM OpportunityLineItem 
+                                                   WHERE Opportunity.StageName = 'Purchase' AND Opportunity.Returned_Or_CM__c = FALSE
+                                                   AND Opportunity.Amount > 1
+                                                   AND Product2.Do_Not_Bucket_Revenue__c = FALSE
+                                                   AND Opportunity.Account.SuperAccount__c IN :superAccountIds
+                                                   AND ServiceDate != Null AND ServiceEndDate__c != Null AND Product2.SBQQ__SubscriptionPricing__c = 'Fixed Price'
+                                                   AND Opportunity.Account.SuperAccount__c != Null
+                                                   ORDER BY ServiceDate];
+            
+            // Key of super date map is the super account id
+            // Key of super account map is the super account id concatenated with the account id
+            // Key of the account product map is the account id concatenated with the product id
+            Map<String,List<List<Date>>> ggSuperDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> ggSuperProductDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> ggAccountDateMap = new Map<String,List<List<Date>>>();
+            
+            Map<String,List<List<Date>>> pdSuperDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> pdSuperProductDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> pdAccountDateMap = new Map<String,List<List<Date>>>();
+            
+            Map<String,List<List<Date>>> superDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> superProductDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> accountDateMap = new Map<String,List<List<Date>>>();
+            
+            
+            // Build the maps by adding the start and end dates of each opportunity product to the list being sure to keep them ordered by start date
+            for(Integer i = 0; i < lineItems.size(); i++){
+                OpportunityLineItem lineItem = lineItems[i];
+                try{
+                    String superId = String.valueOf(lineItem.Opportunity.Account.SuperAccount__c);
+                    String productId = String.valueOf(lineItem.Product2Id);
+                    String accountId = String.valueOf(lineItem.Opportunity.AccountId);
+                    String superProductId = superId + productId;
+                    Date startDate = lineItem.ServiceDate;
+                    Date closeDate = lineItem.Opportunity.CloseDate;
+                    List<Date> lineItemDates = new List<Date>{startDate, lineItem.ServiceEndDate__c};
+                        
+                        if(lineItem.Opportunity.Credited_Opportunity__r.CloseDate != Null){
+                            lineItemDates.add(lineItem.Opportunity.Credited_Opportunity__r.CloseDate);
+                        }
+                    else{
+                        Date minDate = startDate < closeDate ? startDate : closeDate;
+                        lineItemDates.add(minDate);
+                    }
+                        
+                        // TODO Write a function to do this    
+                        List<List<Date>> currSuperDates = superDateMap.containsKey(superId) ? superDateMap.get(superId) : new List<List<Date>>();
+                    currSuperDates.add(lineItemDates);
+                    superDateMap.put(superId,currSuperDates);
+                    
+                    List<List<Date>> currSuperProductDates = superProductDateMap.containsKey(superProductId) ? superProductDateMap.get(superProductId) : new List<List<Date>>();
+                    currSuperProductDates.add(lineItemDates);
+                    superProductDateMap.put(superProductId,currSuperProductDates);
+                    
+					List<List<Date>> currAccountDates = accountDateMap.containsKey(accountId) ? accountDateMap.get(accountId) : new List<List<Date>>();
+                    currAccountDates.add(lineItemDates);
+                    accountDateMap.put(accountId,currAccountDates);
+                    
+                    if(lineItem.ServiceDate < pearDeckCutOverDate){
+                        Boolean isGG = True;
+                        if(lineItem.Product2.Family != Null){
+                            if(lineItem.Product2.Family.contains('Pear Deck')){
+                                isGG = False;
+                                List<List<Date>> pdCurrSuperDates = pdSuperDateMap.containsKey(superId) ? pdSuperDateMap.get(superId) : new List<List<Date>>();
+                                pdCurrSuperDates.add(lineItemDates);
+                                pdSuperDateMap.put(superId,pdCurrSuperDates);
+                                
+                                List<List<Date>> pdCurrSuperProductDates = pdSuperProductDateMap.containsKey(superProductId) ? pdSuperProductDateMap.get(superProductId) : new List<List<Date>>();
+                                pdCurrSuperProductDates.add(lineItemDates);
+                                pdSuperProductDateMap.put(superProductId,pdCurrSuperProductDates);
+                                
+                                List<List<Date>> pdCurrPdAccountDates = pdAccountDateMap.containsKey(accountId) ? pdAccountDateMap.get(accountId) : new List<List<Date>>();
+                                pdCurrPdAccountDates.add(lineItemDates);
+                                pdAccountDateMap.put(accountId,pdCurrPdAccountDates);    
+                            }
+                        }
+                        if(isGG){
+                            List<List<Date>> ggCurrSuperDates = ggSuperDateMap.containsKey(superId) ? ggSuperDateMap.get(superId) : new List<List<Date>>();
+                            ggCurrSuperDates.add(lineItemDates);
+                            ggSuperDateMap.put(superId,ggCurrSuperDates);
+                            
+                            List<List<Date>> ggCurrSuperProductDates = ggSuperProductDateMap.containsKey(superProductId) ? ggSuperProductDateMap.get(superProductId) : new List<List<Date>>();
+                            ggCurrSuperProductDates.add(lineItemDates);
+                            ggSuperProductDateMap.put(superProductId,ggCurrSuperProductDates);
+                            
+							List<List<Date>> ggCurrAccountDates = ggAccountDateMap.containsKey(accountId) ? ggAccountDateMap.get(accountId) : new List<List<Date>>();
+                            ggCurrAccountDates.add(lineItemDates);
+                            ggAccountDateMap.put(accountId,ggCurrAccountDates);  
+                        }
+                    }
+                }
+                catch(Exception err){
+                    errorLog.add('Opportunity Line Item: '+lineItem.Id+
+                                 '\nError Message: '+err.getMessage()+
+                                 '\nStack Trace '+err.getStackTraceString());
+                }
+            }
+            
+            Map<String,Map<String, Date>> superResultMap = getRevDates(superDateMap);
+            Map<String,Map<String, Date>> superProductResultMap = getRevDates(superProductDateMap);
+            Map<String,Map<String, Date>> accountResultMap = getRevDates(accountDateMap);
+            
+            Map<String,Map<String, Date>> pdSuperResultMap = getRevDates(pdSuperDateMap);
+            Map<String,Map<String, Date>> pdSuperProductResultMap = getRevDates(pdSuperProductDateMap);
+            Map<String,Map<String, Date>> pdAccountResultMap = getRevDates(pdAccountDateMap);   
+            
+            Map<String,Map<String, Date>> ggSuperResultMap = getRevDates(ggSuperDateMap);
+            Map<String,Map<String, Date>> ggSuperProductResultMap = getRevDates(ggSuperProductDateMap);
+            Map<String,Map<String, Date>> ggAccountResultMap = getRevDates(ggAccountDateMap);   
+            
+            
+            // If serviceDate is null use closedate
+            // If term is null, use 12 months
+            List<OpportunityLineItem> oppLineItems = [SELECT Opportunity.CloseDate, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, 
+                                                      Product2Id, Product2.Up_Sell_Product__c, Product2.Family, Opportunity.OwnerId,
+                                                      ServiceDate, ServiceEndDate__c, TotalPrice 
+                                                      FROM OpportunityLineItem 
+                                                      WHERE OpportunityId IN :oppMap.keySet()
+                                                      AND Product2.Do_Not_Bucket_Revenue__c = FALSE
+                                                      AND Product2.SBQQ__SubscriptionPricing__c = 'Fixed Price'
+                                                      AND Opportunity.Account.SuperAccount__c != Null
+                                                      ORDER BY ServiceDate];
+            
+            // Composite key of opportunity id, product id, and revenue type
+            Map<String,Revenue_Bucket__c> revBucketMap = new Map<String,Revenue_Bucket__c>();
+            
+            
+  
+            for(OpportunityLineItem oli : oppLineItems){
+                // If start date is >= 2021, use non-prefix.
+				// If start date is < 2021, use other.
+				// -- If product.family is Pear Deck use pdResultMap
+				// -- else use ggResultMap
+                try{
+                    Map<String,Object> bucketResult = new Map<String,Object>();
+                    
+                    if(oli.ServiceDate >= pearDeckCutOverDate){
+                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap, oli);
+                    }
+                    else{
+                        Boolean isGG = True;
+                        if(oli.Product2.Family != Null){
+                            if(oli.Product2.Family.contains('Pear Deck')){
+                                isGG = False;
+                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap, oli);
+                            }
+                        }
+                        if(isGG){
+                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap, oli);
+                        }
+                    }
+                                        
+                    if(bucketResult.containsKey('RenExp')){
+                        renewalExpOppIds.add((Id)bucketResult.get('RenExp'));
+                        if(bucketResult.containsKey('RenExpLineItem')){
+                        	renewalExpOppLineItems.add((Id)bucketResult.get('RenExpLineItem'));
+                        }
+                    }
+                    
+                    revBucketMap = (Map<String,Revenue_Bucket__c>)bucketResult.get('RevBuckets');
+                }
+                catch(Exception err){
+					errorLog.add('Opportunity Line Item: '+oli.Id+
+                                 '\nError Message: '+err.getMessage()+
+                                 '\nStack Trace '+err.getStackTraceString());
+                }
+            }
+            
+            // Wait until the end to deprecate current revenue
+            List<Revenue_Bucket__c> oldRevBuckets = [SELECT Id 
+                                                     FROM Revenue_Bucket__c 
+                                                     WHERE Primary__c = True AND Opportunity__c IN :oppMap.keySet()];
+            
+            insert revBucketMap.values();
+            
+            if(oldRevBuckets.size() > 0){
+                                
+                for(Revenue_Bucket__c oldRevBucket : oldRevBuckets){
+                    oldRevBucket.Primary__c = False;            
+                }
+                
+                update oldRevBuckets;
+            }
+            
+            System.debug('End CPU Time: '+Limits.getCpuTime());
+            System.debug('Limit CPU Time: '+Limits.getLimitCpuTime());
+        }
+        catch(Exception err){
+            errorLog.add('Error Message: '+err.getMessage()+'\nStack Trace: '+err.getStackTraceString());
+        }
+    }
+    
+    public void finish(Database.BatchableContext BC){
+        
+        if(renewalExpOppIds.size() > 0){
+            Database.executeBatch(new BatchOpportunityRevCalc(renewalExpOppIds,renewalExpOppLineItems), 10);
+        }
+        
+        if(errorLog.size() > 0){
+            Error_Log_Handler.errorHandler('BatchRevBucketCalc', String.join(errorLog, '\n\n'));
+        }
+    }
+    
+}
