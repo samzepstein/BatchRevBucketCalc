@@ -5,6 +5,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
     public Set<Id> renewalExpOppLineItems = new Set<Id>();
     public List<String> errorLog = new List<String>();
     public String batchQuery;
+    public Map<Id,Id> comSumMap = new Map<Id,Id>();
     
     public BatchRevBucketCalc(Set<Id> oppIds){
         this.batchQuery = '';
@@ -71,7 +72,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                     if(startDate > maxEndDate + 365){
                         firstBookingDate = startDate;
                     }
-                    if(activeDate > maxEndDate + 365){
+                    if(minDate > maxEndDate + 365){
                         activeDate = minDate;
                     }
                     if(endDate > maxEndDate){
@@ -86,6 +87,8 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                     'AD' => activeDate
                     });
         }
+        
+        system.debug('resultMap: '+resultMap);
         return resultMap;
     }
     
@@ -111,19 +114,25 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         return term;
     }
     
-    public static Map<String,Revenue_Bucket__c> updateRevBucketMap(Map<String,Revenue_Bucket__c> revBucketMap, OpportunityLineItem oli,String revType,Decimal arr,Decimal acv){
+    public static Map<String,Revenue_Bucket__c> updateRevBucketMap(Map<String,Revenue_Bucket__c> revBucketMap, OpportunityLineItem oli,String revType,Decimal arr,Decimal acv, Id comSumId){
         
         // Assuming that revType is in the rev bucket type picklist... add some validation to check that
         String oppId = String.valueOf(oli.OpportunityId);
         String productId = String.valueOf(oli.Product2Id);
         Date closeDate = oli.Opportunity.CloseDate;
+        
+        //revBucketKey = unique combination of oppID + productId + revType
         String revBucketKey = oppId + productId + revType;
-        Revenue_Bucket__c revBucket = revBucketMap.containsKey(revBucketKey) ? revBucketMap.get(revBucketKey) : new Revenue_Bucket__c(Primary__c=True,
+        Boolean isPrimary = revType != 'Site Cross Sell';
+        Revenue_Bucket__c revBucket = revBucketMap.containsKey(revBucketKey) ? revBucketMap.get(revBucketKey) : new Revenue_Bucket__c(Primary__c=isPrimary,
+                                                                                                                                      Commissions_Exception__c=!isPrimary,
                                                                                                                                       Type__c=revType,
                                                                                                                                       Opportunity_Owner__c=oli.Opportunity.OwnerId,
                                                                                                                                       Opportunity__c=oppId,
                                                                                                                                       Product__c=productId,
-                                                                                                                                      Date__c=closeDate);
+                                                                                                                                      Product_Family__c=oli.Product2.Family,
+                                                                                                                                      Date__c=closeDate,
+                                                                                                                                      Commission_Summary__c=comSumId);
         Decimal currArr = revBucket.ARR__c == Null ? 0 : revBucket.ARR__c;
         currArr += arr;
         Decimal currAcv = revBucket.ACV__c == Null ? 0 : revBucket.ACV__c;
@@ -136,7 +145,8 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         return revBucketMap;
     }
     
-    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, OpportunityLineItem oli){
+    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, Map<String,Map<String,Date>> accountProductResultMap, OpportunityLineItem oli, Id comSumId, List<AggregateResult> aggregateDistrictRenewalARR){
+                                                       
         Map<String, Object> returnMap = new Map<String,Object>();
         
         // Determine revenue type based on inclusive 30 day window after first booking dates
@@ -144,10 +154,33 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         String productId = String.valueOf(oli.Product2Id);
         String superProductId = superId + productId;
         String accountId = String.valueOf(oli.Opportunity.AccountId);
+        String accountProductId = accountId + productId;
         String oppId = String.valueOf(oli.OpportunityId);
         Date startDate = oli.ServiceDate;
         Date endDate = oli.ServiceEndDate__c;
         Date closeDate = oli.Opportunity.CloseDate;
+        
+        
+        system.debug('superResultMap: '+ superResultMap);
+        
+        system.debug('revBucketMap: '+ revBucketMap);
+        
+        system.debug('superProductResultMap: '+ superProductResultMap);
+        
+        system.debug('accountResultMap: '+ accountResultMap);
+        
+        system.debug('accountProductResultMap: '+ accountProductResultMap);
+        
+        system.debug('superID: '+ superId);
+        system.debug('productId: '+ productId);
+        system.debug('superProductId: '+ superProductId);
+        system.debug('accountId: '+ accountId);
+        system.debug('accountProductId: '+ accountProductId);
+        system.debug('oppId: '+ oppId);
+        system.debug('startDate: '+ startDate);
+        system.debug('endDate: '+ endDate);
+        system.debug('closeDate: '+ closeDate);
+        
         
         if(startDate == Null){
             startDate = closeDate;
@@ -188,6 +221,14 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                 }
             }
         }
+        
+        else if ( aggregateDistrictRenewalARR.size() > 0 ){
+            
+            system.debug('yay');
+            
+            }
+
+        
         else if(!accountResultMap.containsKey(accountId)){
             revType = 'Site Expansion';
         }
@@ -195,14 +236,22 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             revType = 'Site Expansion';
         }
         else{
+            // Check for account-level cross sell
+            if(!accountProductResultMap.containsKey(accountProductId)){
+                revType = 'Site Cross Sell';
+            }
+            else if(startDate <= accountProductResultMap.get(accountProductId).get('FBD').addDays(30)){
+                revType = 'Site Cross Sell';
+            }            
 			// Queue for Renewal/Expansion Calcs
             returnMap.put('RenExp',oppId);
             returnMap.put('RenExpLineItem',oli.Id);
         }
         
 		if(revType != ''){
-			revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv);
+			revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId);
         }
+
         returnMap.put('RevBuckets',revBucketMap);
         return returnMap;            
     }
@@ -212,18 +261,68 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         
         
         try{
+            
+            List<Contract> contList = [SELECT ID, SBQQ__Opportunity__c FROM Contract
+                                       WHERE SBQQ__RenewalOpportunity__c in :opps
+                                       AND Site_License_Contract__c = TRUE
+                                       AND SBQQ__Opportunity__r.Returned_Or_CM__c = FALSE];
+            
+            //contList:
+            // cont 1: GG-ADM ($500) // GG-TCR ($500)
+            // cont 2: GG-PRD ($1000)
+             
+            
+            List<AggregateResult> aggregateDistrictRenewalARR = [SELECT Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c), SUM(ARR__c) ARR, SUM(ACV__c) ACV 
+                                                  FROM OpportunityLineItem
+                                                  WHERE Contract__c in :contList 
+                                                  AND Opportunity.StageName = 'Purchase'
+                                                  AND ServiceDate != NULL 
+                                                  AND ServiceEndDate__c != Null
+                                                  AND Opportunity.Returned_Or_CM__c = False
+                                                  GROUP BY Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c)];
+
+			//GG-ADM, July, 2021 / $500
+			//GG-TCR, July, 2021 / $500
+			//GG-PRD, July, 2021 / $1000
+            
             System.debug('Start CPU Time: '+Limits.getCpuTime());
             
             Map<Id,Opportunity> oppMap = new Map<Id,Opportunity>(opps);
             
+            system.debug('oppMap: '+oppMap);
+            
             Set<Id> superAccountIds = new Set<Id>();
             Set<Id> accountIds = new Set<Id>();
+            
+            List<Commission_Summary__c> comSums = [SELECT Id, Opportunity__c FROM Commission_Summary__c WHERE Opportunity__c IN :oppMap.keySet()];
+            for(Commission_Summary__c comSum : comSums){
+                comSumMap.put(comSum.Opportunity__c,comSum.Id);
+            }
+            
+            
+            
+            List<Commission_Summary__c> newComSums = new List<Commission_Summary__c>();
             
             for(Opportunity opp : opps){
                 superAccountIds.add(opp.Account.SuperAccount__c);
                 accountIds.add(opp.AccountId);
+                if(!comSumMap.containsKey(opp.Id)){
+                    Commission_Summary__c newComSum = new Commission_Summary__c(Opportunity__c=opp.Id,
+                                                                                Opportunity_Id__c=opp.Id);
+                    newComSums.add(newComSum);
+                }
             }
             
+            if(newComSums.size() > 0){
+                insert newComSums;
+                
+                for(Commission_Summary__c comSum : newComSums){
+                    comSumMap.put(comSum.Opportunity__c,comSum.Id);
+                }
+            }
+            
+            system.debug('comSumMap: '+comSumMap);
+			            
             
             // Exclude Pear Deck before 2021 
             // Subscription Pricing "Fixed Price" ensures there are dates on the opportunity product
@@ -242,13 +341,16 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                                                    AND Opportunity.Account.SuperAccount__c != Null
                                                    ORDER BY ServiceDate];
             
+            
+            system.debug('lineItems: '+ lineItems);
+            
             // Key of super date map is the super account id
             // Key of super account map is the super account id concatenated with the account id
             // Key of the account product map is the account id concatenated with the product id
             Map<String,List<List<Date>>> ggSuperDateMap = new Map<String,List<List<Date>>>();
             Map<String,List<List<Date>>> ggSuperProductDateMap = new Map<String,List<List<Date>>>();
             Map<String,List<List<Date>>> ggAccountDateMap = new Map<String,List<List<Date>>>();
-            
+                        
             Map<String,List<List<Date>>> pdSuperDateMap = new Map<String,List<List<Date>>>();
             Map<String,List<List<Date>>> pdSuperProductDateMap = new Map<String,List<List<Date>>>();
             Map<String,List<List<Date>>> pdAccountDateMap = new Map<String,List<List<Date>>>();
@@ -256,6 +358,13 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             Map<String,List<List<Date>>> superDateMap = new Map<String,List<List<Date>>>();
             Map<String,List<List<Date>>> superProductDateMap = new Map<String,List<List<Date>>>();
             Map<String,List<List<Date>>> accountDateMap = new Map<String,List<List<Date>>>();
+            
+            
+            // Create maps for account product dates. Used for separating cross sell at the account level.
+            Map<String,List<List<Date>>> ggAccountProductDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> pdAccountProductDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> accountProductDateMap = new Map<String,List<List<Date>>>();
+
             
             
             // Build the maps by adding the start and end dates of each opportunity product to the list being sure to keep them ordered by start date
@@ -266,17 +375,13 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                     String productId = String.valueOf(lineItem.Product2Id);
                     String accountId = String.valueOf(lineItem.Opportunity.AccountId);
                     String superProductId = superId + productId;
+                    String accountProductId = accountId + productId;
                     Date startDate = lineItem.ServiceDate;
-                    Date closeDate = lineItem.Opportunity.CloseDate;
+                    Date closeDate = lineItem.Opportunity.Credited_Opportunity__r.CloseDate != Null ? lineItem.Opportunity.Credited_Opportunity__r.CloseDate : lineItem.Opportunity.CloseDate;
                     List<Date> lineItemDates = new List<Date>{startDate, lineItem.ServiceEndDate__c};
-                        
-                        if(lineItem.Opportunity.Credited_Opportunity__r.CloseDate != Null){
-                            lineItemDates.add(lineItem.Opportunity.Credited_Opportunity__r.CloseDate);
-                        }
-                    else{
                         Date minDate = startDate < closeDate ? startDate : closeDate;
-                        lineItemDates.add(minDate);
-                    }
+                    lineItemDates.add(minDate);
+                    
                         
                         // TODO Write a function to do this    
                         List<List<Date>> currSuperDates = superDateMap.containsKey(superId) ? superDateMap.get(superId) : new List<List<Date>>();
@@ -290,6 +395,20 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
 					List<List<Date>> currAccountDates = accountDateMap.containsKey(accountId) ? accountDateMap.get(accountId) : new List<List<Date>>();
                     currAccountDates.add(lineItemDates);
                     accountDateMap.put(accountId,currAccountDates);
+                    
+					List<List<Date>> currAccountProductDates = accountProductDateMap.containsKey(accountProductId) ? accountProductDateMap.get(accountProductId) : new List<List<Date>>();
+                    currAccountProductDates.add(lineItemDates);
+                    accountProductDateMap.put(accountProductId,currAccountProductDates);      
+                    
+                    
+                    
+                    system.debug('superDateMap: '+ superDateMap);
+                    
+                    system.debug('superProductDateMap: '+ superProductDateMap);
+                    
+                    system.debug('accountDateMap: '+ accountDateMap);
+                    
+                    system.debug('accountProductDateMap: '+ accountProductDateMap);
                     
                     if(lineItem.ServiceDate < pearDeckCutOverDate){
                         Boolean isGG = True;
@@ -306,7 +425,11 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                                 
                                 List<List<Date>> pdCurrPdAccountDates = pdAccountDateMap.containsKey(accountId) ? pdAccountDateMap.get(accountId) : new List<List<Date>>();
                                 pdCurrPdAccountDates.add(lineItemDates);
-                                pdAccountDateMap.put(accountId,pdCurrPdAccountDates);    
+                                pdAccountDateMap.put(accountId,pdCurrPdAccountDates);
+                                
+                                List<List<Date>> pdCurrAccountProductDates = pdAccountProductDateMap.containsKey(accountProductId) ? pdAccountProductDateMap.get(accountProductId) : new List<List<Date>>();
+                                pdCurrAccountProductDates.add(lineItemDates);
+                                pdAccountProductDateMap.put(accountProductId,pdCurrAccountProductDates); 
                             }
                         }
                         if(isGG){
@@ -321,6 +444,10 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
 							List<List<Date>> ggCurrAccountDates = ggAccountDateMap.containsKey(accountId) ? ggAccountDateMap.get(accountId) : new List<List<Date>>();
                             ggCurrAccountDates.add(lineItemDates);
                             ggAccountDateMap.put(accountId,ggCurrAccountDates);  
+                            
+                            List<List<Date>> ggCurrAccountProductDates = ggAccountProductDateMap.containsKey(accountProductId) ? ggAccountProductDateMap.get(accountProductId) : new List<List<Date>>();
+                            ggCurrAccountProductDates.add(lineItemDates);
+                            ggAccountProductDateMap.put(accountProductId,ggCurrAccountProductDates);
                         }
                     }
                 }
@@ -341,7 +468,28 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             
             Map<String,Map<String, Date>> ggSuperResultMap = getRevDates(ggSuperDateMap);
             Map<String,Map<String, Date>> ggSuperProductResultMap = getRevDates(ggSuperProductDateMap);
-            Map<String,Map<String, Date>> ggAccountResultMap = getRevDates(ggAccountDateMap);   
+            Map<String,Map<String, Date>> ggAccountResultMap = getRevDates(ggAccountDateMap);
+            
+            // Maps for account-level cross sell
+            Map<String,Map<String, Date>> accountProductResultMap = getRevDates(accountProductDateMap);
+            Map<String,Map<String, Date>> pdAccountProductResultMap = getRevDates(pdAccountProductDateMap);
+            Map<String,Map<String, Date>> ggAccountProductResultMap = getRevDates(ggAccountProductDateMap);
+            
+            system.debug('superResultMap: '+ superResultMap);
+            system.debug('superProductResultMap: '+ superProductResultMap);
+            system.debug('accountResultMap: '+ accountResultMap);
+            system.debug('pdSuperResultMap: '+ pdSuperResultMap);
+            system.debug('pdSuperProductResultMap: '+ pdSuperProductResultMap);
+            system.debug('pdAccountResultMap: '+ pdAccountResultMap);
+            system.debug('ggSuperResultMap: '+ ggSuperResultMap);
+            system.debug('ggSuperProductResultMap: '+ ggSuperProductResultMap);
+            system.debug('ggAccountResultMap: '+ ggAccountResultMap);
+            system.debug('accountProductResultMap: '+ accountProductResultMap);
+            system.debug('pdAccountProductResultMap: '+ pdAccountProductResultMap);
+            system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
+            
+            
+            
             
             
             // If serviceDate is null use closedate
@@ -356,6 +504,8 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                                                       AND Opportunity.Account.SuperAccount__c != Null
                                                       ORDER BY ServiceDate];
             
+            system.debug('oppLineItems: '+ oppLineItems);
+            
             // Composite key of opportunity id, product id, and revenue type
             Map<String,Revenue_Bucket__c> revBucketMap = new Map<String,Revenue_Bucket__c>();
             
@@ -367,23 +517,27 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
 				// -- If product.family is Pear Deck use pdResultMap
 				// -- else use ggResultMap
                 try{
+                    Id comSumId = comSumMap.get(oli.OpportunityId);
                     Map<String,Object> bucketResult = new Map<String,Object>();
                     
                     if(oli.ServiceDate >= pearDeckCutOverDate){
-                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap, oli);
+                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap,accountProductResultMap, oli,comSumId, aggregateDistrictRenewalARR);
                     }
+      
                     else{
                         Boolean isGG = True;
                         if(oli.Product2.Family != Null){
                             if(oli.Product2.Family.contains('Pear Deck')){
                                 isGG = False;
-                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap, oli);
+                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap,pdAccountProductResultMap, oli,comSumId, aggregateDistrictRenewalARR);
                             }
                         }
                         if(isGG){
-                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap, oli);
+                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap,ggAccountProductResultMap, oli,comSumId, aggregateDistrictRenewalARR);
                         }
                     }
+                    
+                    system.debug('bucketResult: '+ bucketResult);
                                         
                     if(bucketResult.containsKey('RenExp')){
                         renewalExpOppIds.add((Id)bucketResult.get('RenExp'));
@@ -404,14 +558,17 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             // Wait until the end to deprecate current revenue
             List<Revenue_Bucket__c> oldRevBuckets = [SELECT Id 
                                                      FROM Revenue_Bucket__c 
-                                                     WHERE Primary__c = True AND Opportunity__c IN :oppMap.keySet()];
-            
+                                                     WHERE (Primary__c = True OR Commissions_Exception__c = True) AND Opportunity__c IN :oppMap.keySet() 
+                                                     AND ((Type__c = 'Site Cross Sell' OR Type__c = 'New' OR Type__c = 'Cross Sell' OR Type__c = 'Site Expansion' OR Type__c = 'Up Sell') 
+                                                          OR (NOT Opportunity__c IN :renewalExpOppIds))];
+                        
             insert revBucketMap.values();
             
             if(oldRevBuckets.size() > 0){
                                 
                 for(Revenue_Bucket__c oldRevBucket : oldRevBuckets){
-                    oldRevBucket.Primary__c = False;            
+                    oldRevBucket.Primary__c = False;
+                    oldRevBucket.Commissions_Exception__c = False;
                 }
                 
                 update oldRevBuckets;
@@ -428,7 +585,11 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
     public void finish(Database.BatchableContext BC){
         
         if(renewalExpOppIds.size() > 0){
-            Database.executeBatch(new BatchOpportunityRevCalc(renewalExpOppIds,renewalExpOppLineItems), 10);
+            Database.executeBatch(new BatchRenExpRevCalc(renewalExpOppIds,renewalExpOppLineItems,comSumMap),10);
+        }
+        else{
+            String query = 'SELECT Id FROM Commission_Summary__c WHERE Opportunity__r.CloseDate = THIS_YEAR';
+        	Database.executeBatch(new BatchRevBucketSummary(query,True));
         }
         
         if(errorLog.size() > 0){
