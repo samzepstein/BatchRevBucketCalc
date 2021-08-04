@@ -3,6 +3,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
     public Set<Id> oppIds;
     public Set<Id> renewalExpOppIds = new Set<Id>();
     public Set<Id> renewalExpOppLineItems = new Set<Id>();
+    public Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR = new Map<ID,Decimal>();
     public List<String> errorLog = new List<String>();
     public String batchQuery;
     public Map<Id,Id> comSumMap = new Map<Id,Id>();
@@ -53,7 +54,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
     
     public static Map<String,Map<String, Date>> getRevDates(Map<String,List<List<Date>>> dateMap){
         
-       //Example: GG-ADM SD:12-12-2020 ED: 11-30-2021 CD: 3-15-2021 AccID: 001410000087fdgAAA SuperAcctID:a714N0000000JRfQAM ProdID:01t41000000gS9OAAU
+        //Example: GG-ADM SD:12-12-2020 ED: 11-30-2021 CD: 3-15-2021 AccID: 001410000087fdgAAA SuperAcctID:a714N0000000JRfQAM ProdID:01t41000000gS9OAAU
         
         system.debug('ENTERING getRevDates:');
         
@@ -143,7 +144,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         return term;
     }
     
-    public static Map<String,Revenue_Bucket__c> updateRevBucketMap(Map<String,Revenue_Bucket__c> revBucketMap, OpportunityLineItem oli,String revType,Decimal arr,Decimal acv, Id comSumId){
+    public static Map<String,Revenue_Bucket__c> updateRevBucketMap(Map<String,Revenue_Bucket__c> revBucketMap, OpportunityLineItem oli,String revType,Decimal arr,Decimal acv, Id comSumId, String districtRollupKey){
         
         system.debug('ENTERING updateRevBucketMap: ');
         
@@ -153,7 +154,8 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         Date closeDate = oli.Opportunity.CloseDate;
         
         //revBucketKey = unique combination of oppID + productId + revType
-        String revBucketKey = oppId + productId + revType;
+        //NEED TO ADD UNIQUE IDENTIFIER TO THIS VARIABLE FOR DISTRICT ROLLUPS
+        String revBucketKey = oppId + productId + revType + districtRollupKey;
         Boolean isPrimary = revType != 'Site Cross Sell';
         Revenue_Bucket__c revBucket = revBucketMap.containsKey(revBucketKey) ? revBucketMap.get(revBucketKey) : new Revenue_Bucket__c(Primary__c=isPrimary,
                                                                                                                                       Commissions_Exception__c=!isPrimary,
@@ -176,9 +178,9 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         return revBucketMap;
     }
     
-    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, Map<String,Map<String,Date>> accountProductResultMap, OpportunityLineItem oli, Id comSumId, List<AggregateResult> aggregateDistrictRenewalARR){
+    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, Map<String,Map<String,Date>> accountProductResultMap, OpportunityLineItem oli, Id comSumId, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap){
         
-        system.debug('ENTERING bucketRevenue: ');
+        system.debug('ENTERING bucketRevenue: '); 
         
         Map<String, Object> returnMap = new Map<String,Object>();
         
@@ -193,6 +195,9 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         Date endDate = oli.ServiceEndDate__c;
         Date closeDate = oli.Opportunity.CloseDate;
         
+        String districtRollupKey = String.valueOf(oli.Contract__r.SBQQ__RenewalOpportunity__c) + productId;
+        
+        system.debug('districtRollupKey: '+ districtRollupKey);
         
         system.debug('superResultMap: '+ superResultMap);
         
@@ -229,8 +234,76 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         // Calculate oli ACV
         Decimal acv = term < 1 ? oli.TotalPrice : arr;
         
-        //checking if there is a super account. There won't be a super account if there are no purchases
+        system.debug('arr before district roll up: '+ arr);
         String revType = '';
+        
+        Decimal arrToSubtract;
+        
+        if(accountDistrictRollupProductDateMap.containsKey(districtRollupKey)){
+            
+            
+            Map<String, Decimal> distrRollUpMap = accountDistrictRollupProductDateMap.get(districtRollupKey);
+            
+            system.debug('distrRollUpMap: '+ distrRollUpMap);
+            
+            for (String key : distrRollUpMap.keySet()){
+                
+                revType = key;
+                
+                Decimal districtRollupARR = distrRollUpMap.get(key);
+                
+                arrToSubtract = arrToSubtract + districtRollupARR;
+                
+                arr = arr - arrToSubtract; 
+                
+                system.debug('key: '+ key);
+                system.debug('revType: '+ revType);
+                system.debug('districtRollupARR: '+ districtRollupARR);
+                system.debug('arrToSubtract: '+ arrToSubtract);
+                system.debug('arr: '+ arr);
+                
+                
+                revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,districtRollupARR,acv,comSumId,districtRollupKey);
+                
+                
+            }
+            
+            //revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId);
+            
+            //return map that has expiring arr in one of three renewal categories
+            //$50 adm arr expiring aug 2021
+            //$50 admin arr expiring oct 2021
+            //Map: 5345432432432 { 'on-time' : 50, 'early' : 50}
+            
+            //apply any dollar to late renewal first, then on time, then early
+            
+            //create rev bucket with renewal type
+            //ex: District first time purchase, purchase $1000 admin, all schools in district already have a total of $100 admin
+            
+            // accountDistrictRollupProductDateMap = Map: 5345432432432 { 'on-time' : 100}
+            // create revenue bucket for line item, rev type is on-time renewal, arr = 100
+            // subtract 100 from the 1000 arr = 900 ---> subtract from arr / acv
+            // 
+            // Expansion example:
+            // If district already has teacher. $100 on-time renewal // $900 license expansion
+            
+            
+            
+            
+        }
+        
+        If(arrToSubtract != NULL){
+            
+            arr = arr - arrToSubtract;
+        }
+        
+        oli.Adjusted_ARR__c = arr;
+        
+        system.debug('arr after district roll up if statement: '+arr);
+        
+        
+        
+        //checking if there is a super account. There won't be a super account if there are no purchases
         if(!superResultMap.containsKey(superId)){
             revType = 'New';
             system.debug('revType: '+ revType);
@@ -278,11 +351,6 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             }
         }
         
-        else if ( aggregateDistrictRenewalARR.size() > 0 ){
-            
-            system.debug('yay');
-            
-        }
         
         //check to see if account has already purchased before
         //If this product is on account Seattle Academy, we are checking to see if Seattle Academy has purchased before
@@ -321,16 +389,19 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                 system.debug('revType: '+ revType);
             }            
             // Queue for Renewal/Expansion Calcs
+            
             returnMap.put('RenExp',oppId);
             returnMap.put('RenExpLineItem',oli.Id);
+            returnMap.put('RenExpLineItemAdjustedARR',oli.Adjusted_ARR__c);
         }
         
         if(revType != ''){
-            revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId);
+            revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId,districtRollupKey);
         }
         
         system.debug('revType: '+ revType);
         
+        //renewalExpOppLineItemsArrMap.put(oli.id, arr);
         
         returnMap.put('RevBuckets',revBucketMap);
         
@@ -354,14 +425,18 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             // cont 2: GG-PRD ($1000)
             
             
-            List<AggregateResult> aggregateDistrictRenewalARR = [SELECT Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c), SUM(ARR__c) ARR, SUM(ACV__c) ACV 
+            List<AggregateResult> aggregateDistrictRenewalARR = [SELECT Contract__r.SBQQ__RenewalOpportunity__c,Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c), SUM(ARR__c) ARR, SUM(ACV__c) ACV 
                                                                  FROM OpportunityLineItem
                                                                  WHERE Contract__c in :contList 
                                                                  AND Opportunity.StageName = 'Purchase'
                                                                  AND ServiceDate != NULL 
                                                                  AND ServiceEndDate__c != Null
                                                                  AND Opportunity.Returned_Or_CM__c = False
-                                                                 GROUP BY Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c)];
+                                                                 GROUP BY Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c)];
+            
+            
+            
+            
             
             //GG-ADM, July, 2021 / $500
             //GG-TCR, July, 2021 / $500
@@ -429,7 +504,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             // Key of super date map is the super account id
             // Key of super account map is the super account id concatenated with the account id
             // Key of the account product map is the account id concatenated with the product id
-
+            
             // Checking for New revenue type
             Map<String,List<List<Date>>> ggSuperDateMap = new Map<String,List<List<Date>>>();
             // Checking for Cross-Sell revenue type
@@ -446,12 +521,76 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             Map<String,List<List<Date>>> accountDateMap = new Map<String,List<List<Date>>>();
             
             
-            // Create maps for account product dates. Used for separating cross sell at the account level.
+            // Create maps for account product dates. Used for separating site cross sell at the account level.
             Map<String,List<List<Date>>> ggAccountProductDateMap = new Map<String,List<List<Date>>>();
             Map<String,List<List<Date>>> pdAccountProductDateMap = new Map<String,List<List<Date>>>();
             
             //checking for Site Cross-Sell revenue type: first purchase of product on account level regardless of district purchase
             Map<String,List<List<Date>>> accountProductDateMap = new Map<String,List<List<Date>>>();
+            
+            //used for district roll-up
+            //key: composite id of renewalOpportunity + productID;  value:  map of key renewal type + arr
+            Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap = new Map<String,Map<String, Decimal>>();
+            
+            
+            for(AggregateResult ar : aggregateDistrictRenewalARR){
+                
+                Map<String, Decimal> renewalTypeMap = new Map<String, Decimal>();
+                
+                String compositeKey = (string)ar.get('Contract__r.SBQQ__RenewalOpportunity__c') + (string)ar.get('Product2Id');
+                
+                String renewalType;
+                
+                //CloseDate: Jan 15 2021 // Renewal start date is Feb 1
+                //april may and june 2021 / 
+                
+                Date closeDate = (date)ar.get('Contract__r.SBQQ__RenewalOpportunity__r.CloseDate');              
+                Integer closeDateMonth = closeDate.month();               
+                Integer closeDateYear = closeDate.year();               
+                Date renewalStartDate = (date)ar.get('Renewal_Start_Date__c');              
+                Integer renewalStartDateMonth = renewalStartDate.month();                
+                Integer renewalStartDateYear = renewalStartDate.year();
+                
+                system.debug('closeDateMonth: '+closeDateMonth);
+                system.debug('closeDateYear: '+closeDateYear);
+                
+                
+                //renewalType = 'Late Renewal';
+                
+                //Early
+                If( Date.newInstance(closeDate.year(), closeDate.month(), 1) < Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
+                    
+                    renewalType = 'Early Renewal';
+                    
+                }
+                
+                //On-Time
+                else if ( Date.newInstance(closeDate.year(), closeDate.month(), 1) == Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
+                    
+                    renewalType = 'On-Time Renewal';
+                }
+                
+                else if(Date.newInstance(closeDate.year(), closeDate.month(), 1) > Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
+                    
+                    
+                    
+                    renewalType = 'Late Renewal';
+                    
+                }
+                
+                
+                
+                renewalTypeMap.put(renewalType,(decimal)ar.get('ARR'));
+                
+                system.debug('renewalTypeMap: '+renewalTypeMap);
+                
+                accountDistrictRollupProductDateMap.put(compositeKey,renewalTypeMap);
+                
+                //oppProdid: 23432432342 { 'early' : 3242.33}
+                
+            }
+            
+            system.debug('accountDistrictRollupProductDateMap: '+accountDistrictRollupProductDateMap);
             
             
             system.debug('lineItems.size(): '+lineItems.size());
@@ -505,7 +644,10 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                     
                     List<List<Date>> currAccountProductDates = accountProductDateMap.containsKey(accountProductId) ? accountProductDateMap.get(accountProductId) : new List<List<Date>>();
                     currAccountProductDates.add(lineItemDates);
-                    accountProductDateMap.put(accountProductId,currAccountProductDates);      
+                    accountProductDateMap.put(accountProductId,currAccountProductDates);
+                    
+                    
+                    
                     
                     
                     system.debug('currSuperDates: '+currSuperDates);
@@ -610,7 +752,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             Map<String,Map<String, Date>> ggSuperProductResultMap = getRevDates(ggSuperProductDateMap);
             Map<String,Map<String, Date>> ggAccountResultMap = getRevDates(ggAccountDateMap);
             
-            // Maps for account-level cross sell
+            // Maps for site-cross sell
             Map<String,Map<String, Date>> accountProductResultMap = getRevDates(accountProductDateMap);
             Map<String,Map<String, Date>> pdAccountProductResultMap = getRevDates(pdAccountProductDateMap);
             Map<String,Map<String, Date>> ggAccountProductResultMap = getRevDates(ggAccountProductDateMap);
@@ -636,7 +778,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             // If term is null, use 12 months
             List<OpportunityLineItem> oppLineItems = [SELECT Opportunity.CloseDate, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, 
                                                       Product2Id, Product2.Up_Sell_Product__c, Product2.Family, Opportunity.OwnerId,
-                                                      ServiceDate, ServiceEndDate__c, TotalPrice 
+                                                      ServiceDate, ServiceEndDate__c, TotalPrice, Contract__r.SBQQ__RenewalOpportunity__c 
                                                       FROM OpportunityLineItem 
                                                       WHERE OpportunityId IN :oppMap.keySet()
                                                       AND Product2.Do_Not_Bucket_Revenue__c = FALSE
@@ -666,7 +808,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                     Map<String,Object> bucketResult = new Map<String,Object>();
                     
                     if(oli.ServiceDate >= pearDeckCutOverDate){
-                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap,accountProductResultMap, oli,comSumId, aggregateDistrictRenewalARR);
+                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap,accountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap);
                     }
                     
                     else{
@@ -674,11 +816,11 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                         if(oli.Product2.Family != Null){
                             if(oli.Product2.Family.contains('Pear Deck')){
                                 isGG = False;
-                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap,pdAccountProductResultMap, oli,comSumId, aggregateDistrictRenewalARR);
+                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap,pdAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap);
                             }
                         }
                         if(isGG){
-                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap,ggAccountProductResultMap, oli,comSumId, aggregateDistrictRenewalARR);
+                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap,ggAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap);
                         }
                     }
                     
@@ -688,10 +830,14 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                         renewalExpOppIds.add((Id)bucketResult.get('RenExp'));
                         if(bucketResult.containsKey('RenExpLineItem')){
                             renewalExpOppLineItems.add((Id)bucketResult.get('RenExpLineItem'));
+                            
+                            if(bucketResult.containsKey('RenExpLineItemAdjustedARR')){
+                                renewalExpOppLineItemsAdjustedARR.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedARR'));
+                            }
                         }
+                        
+                        revBucketMap = (Map<String,Revenue_Bucket__c>)bucketResult.get('RevBuckets');
                     }
-                    
-                    revBucketMap = (Map<String,Revenue_Bucket__c>)bucketResult.get('RevBuckets');
                 }
                 catch(Exception err){
                     errorLog.add('Opportunity Line Item: '+oli.Id+
