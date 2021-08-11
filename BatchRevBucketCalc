@@ -4,6 +4,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
     public Set<Id> renewalExpOppIds = new Set<Id>();
     public Set<Id> renewalExpOppLineItems = new Set<Id>();
     public Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR = new Map<ID,Decimal>();
+    public Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV = new Map<ID,Decimal>();
     public List<String> errorLog = new List<String>();
     public String batchQuery;
     public Map<Id,Id> comSumMap = new Map<Id,Id>();
@@ -127,19 +128,22 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         
         Decimal term = midTerm +  adjustedSum/364;
         
-        system.debug('rawDaysStartYr: '+ rawDaysStartYr);
-        
-        system.debug('adjustedDaysStartYr: '+ adjustedDaysStartYr);
-        
-        system.debug('rawDaysEndYr: '+ rawDaysEndYr);
-        
-        system.debug('adjustedDaysEndYr: '+ adjustedDaysEndYr);
-        
-        system.debug('rawSum: '+ rawSum);
-        
-        system.debug('adjustedSum: '+ adjustedSum);
-        
-        system.debug('term: '+ term);
+        /*
+
+system.debug('rawDaysStartYr: '+ rawDaysStartYr);
+
+system.debug('adjustedDaysStartYr: '+ adjustedDaysStartYr);
+
+system.debug('rawDaysEndYr: '+ rawDaysEndYr);
+
+system.debug('adjustedDaysEndYr: '+ adjustedDaysEndYr);
+
+system.debug('rawSum: '+ rawSum);
+
+system.debug('adjustedSum: '+ adjustedSum);
+
+system.debug('term: '+ term);
+*/
         
         return term;
     }
@@ -178,7 +182,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         return revBucketMap;
     }
     
-    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, Map<String,Map<String,Date>> accountProductResultMap, OpportunityLineItem oli, Id comSumId, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap){
+    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, Map<String,Map<String,Date>> accountProductResultMap, OpportunityLineItem oli, Id comSumId, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ARR, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ACV ){
         
         system.debug('ENTERING bucketRevenue: '); 
         
@@ -195,7 +199,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         Date endDate = oli.ServiceEndDate__c;
         Date closeDate = oli.Opportunity.CloseDate;
         
-        String districtRollupKey = String.valueOf(oli.Contract__r.SBQQ__RenewalOpportunity__c) + productId;
+        String districtRollupKey = oppId + productId;
         
         system.debug('districtRollupKey: '+ districtRollupKey);
         
@@ -235,38 +239,58 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         Decimal acv = term < 1 ? oli.TotalPrice : arr;
         
         system.debug('arr before district roll up: '+ arr);
+        
+        system.debug('accountDistrictRollupProductDateMap_ARR: '+ accountDistrictRollupProductDateMap_ARR);
+        
+        system.debug('districtRollupKey: '+ districtRollupKey);
+        
         String revType = '';
         
-        Decimal arrToSubtract;
         
-        if(accountDistrictRollupProductDateMap.containsKey(districtRollupKey)){
+        if(accountDistrictRollupProductDateMap_ARR.containsKey(districtRollupKey)){
             
-            
-            Map<String, Decimal> distrRollUpMap = accountDistrictRollupProductDateMap.get(districtRollupKey);
+           
+            Map<String, Decimal> distrRollUpMap = accountDistrictRollupProductDateMap_ARR.get(districtRollupKey);
+            Map<String, Decimal> distrRollUpMap_ACV = accountDistrictRollupProductDateMap_ACV.get(districtRollupKey);
             
             system.debug('distrRollUpMap: '+ distrRollUpMap);
+            system.debug('distrRollUpMap_ACV: '+ distrRollUpMap_ACV);
+            
+            Integer counter = 0;
             
             for (String key : distrRollUpMap.keySet()){
                 
-                revType = key;
+                system.debug('key: '+ key);
+                system.debug('counter: '+ counter);
+                
                 
                 Decimal districtRollupARR = distrRollUpMap.get(key);
+                Decimal districtRollupACV = distrRollUpMap_ACV.get(key);
                 
-                arrToSubtract = arrToSubtract + districtRollupARR;
-                
-                arr = arr - arrToSubtract; 
-                
-                system.debug('key: '+ key);
-                system.debug('revType: '+ revType);
                 system.debug('districtRollupARR: '+ districtRollupARR);
-                system.debug('arrToSubtract: '+ arrToSubtract);
+                system.debug('districtRollupACV: '+ districtRollupACV);
+                
+                
+                arr = arr - districtRollupARR; 
+                
+                acv = acv - districtRollupACV;
+                
                 system.debug('arr: '+ arr);
+                system.debug('acv: '+ acv);
                 
+                //build additional map with acv -- mirror arr map -- creating revenue bucket
+                revBucketMap = updateRevBucketMap(revBucketMap,oli,key,districtRollupARR,districtRollupACV,comSumId,districtRollupKey);
                 
-                revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,districtRollupARR,acv,comSumId,districtRollupKey);
+                //update adjusted arr field which will be passed to batchrenexprevcalc class
+                oli.Adjusted_ARR__c = arr;
+                oli.Adjusted_ACV_for_district_rollup__c = acv;
+                
+                counter = counter + 1;
                 
                 
             }
+            
+            system.debug('counter: '+ counter);
             
             //revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId);
             
@@ -292,14 +316,12 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             
         }
         
-        If(arrToSubtract != NULL){
-            
-            arr = arr - arrToSubtract;
-        }
         
-        oli.Adjusted_ARR__c = arr;
+        
+        //oli.Adjusted_ARR__c = arr;
         
         system.debug('arr after district roll up if statement: '+arr);
+        system.debug('acv after district roll up if statement: '+acv);
         
         
         
@@ -392,7 +414,15 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             
             returnMap.put('RenExp',oppId);
             returnMap.put('RenExpLineItem',oli.Id);
-            returnMap.put('RenExpLineItemAdjustedARR',oli.Adjusted_ARR__c);
+            
+            if(oli.Adjusted_ARR__c != NULL){
+                returnMap.put('RenExpLineItemAdjustedARR',oli.Adjusted_ARR__c);
+            }
+            
+            if(oli.Adjusted_ACV_for_district_rollup__c != NULL){
+                returnMap.put('RenExpLineItemAdjustedACV',oli.Adjusted_ACV_for_district_rollup__c);
+                
+            }
         }
         
         if(revType != ''){
@@ -417,24 +447,28 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             
             List<Contract> contList = [SELECT ID, SBQQ__Opportunity__c FROM Contract
                                        WHERE SBQQ__RenewalOpportunity__c in :opps
-                                       AND Site_License_Contract__c = TRUE
+                                       AND Site_License_Contract_Lookup__r.id != NULL
                                        AND SBQQ__Opportunity__r.Returned_Or_CM__c = FALSE];
+            
+            system.debug('contList'+ contList);
             
             //contList:
             // cont 1: GG-ADM ($500) // GG-TCR ($500)
             // cont 2: GG-PRD ($1000)
             
             
-            List<AggregateResult> aggregateDistrictRenewalARR = [SELECT Contract__r.SBQQ__RenewalOpportunity__c,Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c), SUM(ARR__c) ARR, SUM(ACV__c) ACV 
+            List<AggregateResult> aggregateDistrictRenewalProducts = [SELECT Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, Renewal_Start_Date__c, SUM(ARR__c) ARR, SUM(ACV__c) ACV 
                                                                  FROM OpportunityLineItem
                                                                  WHERE Contract__c in :contList 
                                                                  AND Opportunity.StageName = 'Purchase'
                                                                  AND ServiceDate != NULL 
                                                                  AND ServiceEndDate__c != Null
                                                                  AND Opportunity.Returned_Or_CM__c = False
-                                                                 GROUP BY Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c)];
+                                                                 GROUP BY Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, Renewal_Start_Date__c];
             
             
+            
+            system.debug('aggregateDistrictRenewalProducts'+ aggregateDistrictRenewalProducts);
             
             
             
@@ -530,27 +564,37 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             
             //used for district roll-up
             //key: composite id of renewalOpportunity + productID;  value:  map of key renewal type + arr
-            Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap = new Map<String,Map<String, Decimal>>();
+            Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ARR = new Map<String,Map<String, Decimal>>();
+            
+            //key: composite id of renewalOpportunity + productID;  value:  map of key renewal type + acv
+            Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ACV = new Map<String,Map<String, Decimal>>();
             
             
-            for(AggregateResult ar : aggregateDistrictRenewalARR){
+            for(AggregateResult ar : aggregateDistrictRenewalProducts){
                 
-                Map<String, Decimal> renewalTypeMap = new Map<String, Decimal>();
+                system.debug('ar: '+ar);
                 
-                String compositeKey = (string)ar.get('Contract__r.SBQQ__RenewalOpportunity__c') + (string)ar.get('Product2Id');
+                Map<String, Decimal> renewalTypeMap_ARR = new Map<String, Decimal>();
+                Map<String, Decimal> renewalTypeMap_ACV = new Map<String, Decimal>();
+                
+                String compositeKey = (string)ar.get('SBQQ__RenewalOpportunity__c') + (string)ar.get('Product2Id');
+                
+                system.debug('compositeKey: '+compositeKey);
                 
                 String renewalType;
                 
                 //CloseDate: Jan 15 2021 // Renewal start date is Feb 1
                 //april may and june 2021 / 
                 
-                Date closeDate = (date)ar.get('Contract__r.SBQQ__RenewalOpportunity__r.CloseDate');              
+                Date closeDate = (date)ar.get('CloseDate');    
+                system.debug('closeDate: '+closeDate);
                 Integer closeDateMonth = closeDate.month();               
                 Integer closeDateYear = closeDate.year();               
                 Date renewalStartDate = (date)ar.get('Renewal_Start_Date__c');              
                 Integer renewalStartDateMonth = renewalStartDate.month();                
                 Integer renewalStartDateYear = renewalStartDate.year();
                 
+                system.debug('renewalStartDate: '+renewalStartDate);
                 system.debug('closeDateMonth: '+closeDateMonth);
                 system.debug('closeDateYear: '+closeDateYear);
                 
@@ -567,7 +611,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                 //On-Time
                 else if ( Date.newInstance(closeDate.year(), closeDate.month(), 1) == Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
                     
-                    renewalType = 'On-Time Renewal';
+                    renewalType = 'On Time Renewal';
                 }
                 
                 else if(Date.newInstance(closeDate.year(), closeDate.month(), 1) > Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
@@ -580,17 +624,22 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                 
                 
                 
-                renewalTypeMap.put(renewalType,(decimal)ar.get('ARR'));
+                renewalTypeMap_ARR.put(renewalType,(decimal)ar.get('ARR'));
                 
-                system.debug('renewalTypeMap: '+renewalTypeMap);
+                renewalTypeMap_ACV.put(renewalType,(decimal)ar.get('ACV'));
                 
-                accountDistrictRollupProductDateMap.put(compositeKey,renewalTypeMap);
+                system.debug('renewalTypeMap_ARR: '+renewalTypeMap_ARR);
+                system.debug('renewalTypeMap_ACV: '+renewalTypeMap_ACV);
+                
+                accountDistrictRollupProductDateMap_ARR.put(compositeKey,renewalTypeMap_ARR);
+                accountDistrictRollupProductDateMap_ACV.put(compositeKey,renewalTypeMap_ACV);
                 
                 //oppProdid: 23432432342 { 'early' : 3242.33}
                 
             }
             
-            system.debug('accountDistrictRollupProductDateMap: '+accountDistrictRollupProductDateMap);
+            system.debug('accountDistrictRollupProductDateMap_ARR: '+accountDistrictRollupProductDateMap_ARR);
+            system.debug('accountDistrictRollupProductDateMap_ACV: '+accountDistrictRollupProductDateMap_ACV);
             
             
             system.debug('lineItems.size(): '+lineItems.size());
@@ -609,19 +658,20 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                         Date minDate = startDate < closeDate ? startDate : closeDate;
                     lineItemDates.add(minDate);
                     
-                    system.debug('ITERATION OF i: '+i);
-                    system.debug('lineItem: '+lineItem);
-                    system.debug('superId: '+superId);
-                    system.debug('productId: '+productId);
-                    system.debug('accountId: '+accountId);
-                    system.debug('superProductId: '+superProductId);
-                    system.debug('accountProductId: '+accountProductId);
-                    system.debug('startDate: '+startDate);
-                    system.debug('lineItem.ServiceDate: '+lineItem.ServiceDate);
-                    system.debug('closeDate: '+closeDate);
-                    system.debug('minDate: '+minDate);
-                    system.debug('lineItemDates: '+lineItemDates);
-                    
+                    /*
+system.debug('ITERATION OF i: '+i);
+system.debug('lineItem: '+lineItem);
+system.debug('superId: '+superId);
+system.debug('productId: '+productId);
+system.debug('accountId: '+accountId);
+system.debug('superProductId: '+superProductId);
+system.debug('accountProductId: '+accountProductId);
+system.debug('startDate: '+startDate);
+system.debug('lineItem.ServiceDate: '+lineItem.ServiceDate);
+system.debug('closeDate: '+closeDate);
+system.debug('minDate: '+minDate);
+system.debug('lineItemDates: '+lineItemDates);
+*/
                     
                     
                     // TODO Write a function to do this    
@@ -649,18 +699,19 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                     
                     
                     
-                    
-                    system.debug('currSuperDates: '+currSuperDates);
-                    system.debug('superDateMap: '+ superDateMap);
-                    
-                    system.debug('currSuperProductDates: '+currSuperDates);
-                    system.debug('superProductDateMap: '+ superProductDateMap);
-                    
-                    system.debug('currAccountDates: '+currSuperDates);
-                    system.debug('accountDateMap: '+ accountDateMap);
-                    
-                    system.debug('currAccountProductDates: '+currSuperDates);
-                    system.debug('accountProductDateMap: '+ accountProductDateMap);
+                    /*
+system.debug('currSuperDates: '+currSuperDates);
+system.debug('superDateMap: '+ superDateMap);
+
+system.debug('currSuperProductDates: '+currSuperDates);
+system.debug('superProductDateMap: '+ superProductDateMap);
+
+system.debug('currAccountDates: '+currSuperDates);
+system.debug('accountDateMap: '+ accountDateMap);
+
+system.debug('currAccountProductDates: '+currSuperDates);
+system.debug('accountProductDateMap: '+ accountProductDateMap);
+*/
                     
                     if(lineItem.ServiceDate < pearDeckCutOverDate){
                         Boolean isGG = True;
@@ -683,19 +734,21 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                                 pdCurrAccountProductDates.add(lineItemDates);
                                 pdAccountProductDateMap.put(accountProductId,pdCurrAccountProductDates); 
                                 
-                                system.debug('pdCurrSuperDates: '+pdCurrSuperDates);
-                                system.debug('pdSuperDateMap: '+pdSuperDateMap);
-                                
-                                
-                                system.debug('pdCurrSuperProductDates: '+pdCurrSuperProductDates);
-                                system.debug('pdSuperProductDateMap: '+pdSuperProductDateMap);
-                                
-                                system.debug('pdCurrPdAccountDates: '+pdCurrPdAccountDates);
-                                system.debug('pdAccountDateMap: '+pdAccountDateMap);
-                                
-                                
-                                system.debug('pdCurrAccountProductDates: '+pdCurrAccountProductDates);
-                                system.debug('pdAccountProductDateMap: '+pdAccountProductDateMap);
+                                /*
+system.debug('pdCurrSuperDates: '+pdCurrSuperDates);
+system.debug('pdSuperDateMap: '+pdSuperDateMap);
+
+
+system.debug('pdCurrSuperProductDates: '+pdCurrSuperProductDates);
+system.debug('pdSuperProductDateMap: '+pdSuperProductDateMap);
+
+system.debug('pdCurrPdAccountDates: '+pdCurrPdAccountDates);
+system.debug('pdAccountDateMap: '+pdAccountDateMap);
+
+
+system.debug('pdCurrAccountProductDates: '+pdCurrAccountProductDates);
+system.debug('pdAccountProductDateMap: '+pdAccountProductDateMap);
+*/
                             }
                         }
                         if(isGG){
@@ -715,17 +768,20 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                             ggCurrAccountProductDates.add(lineItemDates);
                             ggAccountProductDateMap.put(accountProductId,ggCurrAccountProductDates);
                             
-                            system.debug('ggCurrSuperDates: '+ggCurrSuperDates);
-                            system.debug('ggSuperDateMap: '+ggSuperDateMap);
-                            
-                            system.debug('ggCurrSuperProductDates: '+ggCurrSuperProductDates);
-                            system.debug('ggSuperProductDateMap: '+ggSuperProductDateMap);
-                            
-                            system.debug('ggCurrAccountDates: '+ggCurrAccountDates);
-                            system.debug('ggAccountDateMap: '+ggAccountDateMap);
-                            
-                            system.debug('ggCurrAccountProductDates: '+ggCurrAccountProductDates);
-                            system.debug('ggAccountProductDateMap: '+ggAccountProductDateMap);
+                            /*
+
+system.debug('ggCurrSuperDates: '+ggCurrSuperDates);
+system.debug('ggSuperDateMap: '+ggSuperDateMap);
+
+system.debug('ggCurrSuperProductDates: '+ggCurrSuperProductDates);
+system.debug('ggSuperProductDateMap: '+ggSuperProductDateMap);
+
+system.debug('ggCurrAccountDates: '+ggCurrAccountDates);
+system.debug('ggAccountDateMap: '+ggAccountDateMap);
+
+system.debug('ggCurrAccountProductDates: '+ggCurrAccountProductDates);
+system.debug('ggAccountProductDateMap: '+ggAccountProductDateMap);
+*/
                         }
                     }
                 }
@@ -757,28 +813,30 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
             Map<String,Map<String, Date>> pdAccountProductResultMap = getRevDates(pdAccountProductDateMap);
             Map<String,Map<String, Date>> ggAccountProductResultMap = getRevDates(ggAccountProductDateMap);
             
-            system.debug('superResultMap: '+ superResultMap);
-            system.debug('superProductResultMap: '+ superProductResultMap);
-            system.debug('accountResultMap: '+ accountResultMap);
-            system.debug('pdSuperResultMap: '+ pdSuperResultMap);
-            system.debug('pdSuperProductResultMap: '+ pdSuperProductResultMap);
-            system.debug('pdAccountResultMap: '+ pdAccountResultMap);
-            system.debug('ggSuperResultMap: '+ ggSuperResultMap);
-            system.debug('ggSuperProductResultMap: '+ ggSuperProductResultMap);
-            system.debug('ggAccountResultMap: '+ ggAccountResultMap);
-            system.debug('accountProductResultMap: '+ accountProductResultMap);
-            system.debug('pdAccountProductResultMap: '+ pdAccountProductResultMap);
-            system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
-            
+            /*
+
+system.debug('superResultMap: '+ superResultMap);
+system.debug('superProductResultMap: '+ superProductResultMap);
+system.debug('accountResultMap: '+ accountResultMap);
+system.debug('pdSuperResultMap: '+ pdSuperResultMap);
+system.debug('pdSuperProductResultMap: '+ pdSuperProductResultMap);
+system.debug('pdAccountResultMap: '+ pdAccountResultMap);
+system.debug('ggSuperResultMap: '+ ggSuperResultMap);
+system.debug('ggSuperProductResultMap: '+ ggSuperProductResultMap);
+system.debug('ggAccountResultMap: '+ ggAccountResultMap);
+system.debug('accountProductResultMap: '+ accountProductResultMap);
+system.debug('pdAccountProductResultMap: '+ pdAccountProductResultMap);
+system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
+*/
             
             
             
             
             // If serviceDate is null use closedate
             // If term is null, use 12 months
-            List<OpportunityLineItem> oppLineItems = [SELECT Opportunity.CloseDate, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, 
+            List<OpportunityLineItem> oppLineItems = [SELECT Opportunity.CloseDate, OpportunityId, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, 
                                                       Product2Id, Product2.Up_Sell_Product__c, Product2.Family, Opportunity.OwnerId,
-                                                      ServiceDate, ServiceEndDate__c, TotalPrice, Contract__r.SBQQ__RenewalOpportunity__c 
+                                                      ServiceDate, ServiceEndDate__c, TotalPrice, Contract__r.SBQQ__Opportunity__c
                                                       FROM OpportunityLineItem 
                                                       WHERE OpportunityId IN :oppMap.keySet()
                                                       AND Product2.Do_Not_Bucket_Revenue__c = FALSE
@@ -808,7 +866,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                     Map<String,Object> bucketResult = new Map<String,Object>();
                     
                     if(oli.ServiceDate >= pearDeckCutOverDate){
-                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap,accountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap);
+                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap,accountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR, accountDistrictRollupProductDateMap_ACV);
                     }
                     
                     else{
@@ -816,11 +874,11 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                         if(oli.Product2.Family != Null){
                             if(oli.Product2.Family.contains('Pear Deck')){
                                 isGG = False;
-                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap,pdAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap);
+                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap,pdAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR, accountDistrictRollupProductDateMap_ACV);
                             }
                         }
                         if(isGG){
-                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap,ggAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap);
+                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap,ggAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR,accountDistrictRollupProductDateMap_ACV);
                         }
                     }
                     
@@ -833,11 +891,23 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                             
                             if(bucketResult.containsKey('RenExpLineItemAdjustedARR')){
                                 renewalExpOppLineItemsAdjustedARR.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedARR'));
+                               
+                            }
+                            if(bucketResult.containsKey('RenExpLineItemAdjustedACV')){
+                                renewalExpOppLineItemsAdjustedACV.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedACV'));
+                               
                             }
                         }
                         
                         revBucketMap = (Map<String,Revenue_Bucket__c>)bucketResult.get('RevBuckets');
                     }
+                    
+                    system.debug('renewalExpOppIds: '+renewalExpOppIds);
+                    system.debug('renewalExpOppLineItems: '+renewalExpOppLineItems);
+                    system.debug('renewalExpOppLineItemsAdjustedARR: '+renewalExpOppLineItemsAdjustedARR);
+                    system.debug('renewalExpOppLineItemsAdjustedACV: '+renewalExpOppLineItemsAdjustedACV);
+                    
+                    
                 }
                 catch(Exception err){
                     errorLog.add('Opportunity Line Item: '+oli.Id+
@@ -876,7 +946,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
     public void finish(Database.BatchableContext BC){
         
         if(renewalExpOppIds.size() > 0){
-            Database.executeBatch(new BatchRenExpRevCalc(renewalExpOppIds,renewalExpOppLineItems,comSumMap),10);
+            Database.executeBatch(new BatchRenExpRevCalc(renewalExpOppIds,renewalExpOppLineItems,comSumMap, renewalExpOppLineItemsAdjustedARR, renewalExpOppLineItemsAdjustedACV),10);
         }
         else{
             String query = 'SELECT Id FROM Commission_Summary__c WHERE Opportunity__r.CloseDate = THIS_YEAR';
