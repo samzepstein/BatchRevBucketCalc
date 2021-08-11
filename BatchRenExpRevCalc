@@ -1,0 +1,495 @@
+public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database.Stateful {
+    
+    public Set<Id> oppIds = new Set<Id>();
+    public Set<Id> oppLineItems = new Set<Id>();
+    public Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR = new Map<ID,Decimal>();
+    public Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV = new Map<ID,Decimal>();
+    public List<String> errorLog = new List<String>();
+    public Map<Id,Id> comSumMap = new Map<Id,Id>();
+    
+    // For each product aggregation, calculate the amount of renewal ARR and store it on the relavant opportunity 
+    // as well as on an account/product/month map
+    
+    Map<String,Map<String,Decimal>> acctProdMonthRenewal = new Map<String,Map<String,Decimal>>();
+    Map<String,Map<String,Decimal>> acctProdMonthRecap = new Map<String,Map<String,Decimal>>();
+    
+    public static Revenue_Bucket__c newRevenueBucket(Id oppId, Id productId, String family, Id ownerId, String revType, Date revDate,Id comSumId){
+        Revenue_Bucket__c newRevenueBucket = new Revenue_Bucket__c(
+            Opportunity__c = oppId,
+            Product__c = productId,
+            Opportunity_Owner__c = ownerId,
+            Type__c = revType,
+            Date__c = revDate,
+            ACV__c = 0,
+            ARR__c = 0,
+            Expiring_ARR__c = 0,
+            Expiring_ACV__c = 0,
+            Primary__c = True,
+            Commission_Summary__c = comSumId);
+        newRevenueBucket.Product_Family__c = family;
+        return newRevenueBucket;
+    }
+    
+    
+    public BatchRenExpRevCalc(Set<Id> oppIds, Set<Id> oppLineItems, Map<Id,Id> comSumMap, Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR, Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV){
+        this.oppIds = oppIds;
+        this.oppLineItems = oppLineItems;
+        this.comSumMap = comSumMap;
+        this.renewalExpOppLineItemsAdjustedARR = renewalExpOppLineItemsAdjustedARR;
+        this.renewalExpOppLineItemsAdjustedACV = renewalExpOppLineItemsAdjustedACV;
+    }
+    
+    
+    
+    public Database.QueryLocator start(Database.BatchableContext BC){
+        String queryStr = 'SELECT Id FROM Opportunity WHERE Id IN :oppIds';
+        return Database.getQueryLocator(queryStr);
+    }
+    
+    public static Map<String,Map<Integer,Map<String,Decimal>>> mapProductsToMonth(List<AggregateResult> productMonthList){
+        
+        system.debug('ENTERING mapProductsToMonth: ');
+        
+        Map<String,Map<Integer,Map<String,Decimal>>> productMonthMap = new Map<String,Map<Integer,Map<String,Decimal>>>();
+        // Account for null case in Year and Month
+        for(AggregateResult ar : productMonthList){
+            Map<String,String> mapErrors = new Map<String,String>();
+            String accountProdKey = (String)ar.get('AccountId')+(String)ar.get('Product2Id');
+            Integer monthKey = (Integer)ar.get('Year') * 12 + (Integer)ar.get('Month');
+            Map<Integer,Map<String,Decimal>> monthChurn = productMonthMap.containsKey(accountProdKey) ? productMonthMap.get(accountProdKey) : new Map<Integer,Map<String,Decimal>>();
+            Map<String,Decimal> revTypeChurn = new Map<String,Decimal>{'ARR'=>(Decimal)ar.get('ARR'),'ACV'=>(Decimal)ar.get('ACV')};
+                monthChurn.put(monthKey,revTypeChurn);
+            productMonthMap.put(accountProdKey,monthChurn);
+            
+            System.debug('ar: '+ar); 
+            System.debug('productMonthList: '+productMonthList); 
+            System.debug('accountProdKey: '+accountProdKey); 
+            System.debug('monthKey: '+monthKey); 
+            System.debug('monthChurn: '+monthChurn); 
+            System.debug('revTypeChurn: '+revTypeChurn); 
+
+            
+            
+        }
+        System.debug('productMonthMap: '+productMonthMap); 
+        
+        return productMonthMap;
+    }
+    
+    
+    public void execute(Database.BatchableContext BC, List<Opportunity> batchOpps){
+        
+        
+        System.debug('batchOpps: '+batchOpps);   
+        
+        Period qtr = [SELECT StartDate, EndDate FROM Period WHERE Type = 'Quarter' AND StartDate = THIS_FISCAL_QUARTER];
+        
+        System.debug('qtr: '+qtr);   
+        Date tday = System.today();
+        
+        System.debug('Start Time: '+Limits.getCpuTime());        
+        try{
+            
+            // Get opportunities that have opportunity products where the month/year of the start date is greater than or equal to the
+            // minimum product start date on the trigger opportunity.
+            
+            Map<Id,Opportunity> queryOppMap = new Map<Id,Opportunity>(batchOpps);
+            
+            Set<Id> queryOppIds = queryOppMap.keyset();
+            
+            String oppQuery = 'SELECT ID, OwnerId, AccountId, Account.Active_Date__c, CloseDate, Credited_Opportunity__c, Credited_Opportunity__r.CloseDate '+
+                'FROM Opportunity WHERE Id IN :queryOppIds FOR UPDATE';
+            
+            List<Opportunity> opps = Database.query(oppQuery);   
+            
+            System.debug('opps: '+opps);
+            
+            Set<Id> acctIds = new Set<Id>();
+            
+            for(Opportunity opp : opps){
+                acctIds.add(opp.AccountId);
+            }
+            
+            Map<Id,Opportunity> oppMap = new Map<Id,Opportunity>(opps);
+            
+            Set<Id> batchOppIds = oppMap.keySet();
+            
+            // For each opportunity in the batch, get all of the new and expiring opportunity products from closed won opportunities 
+            // with ARR grouped by their account, product, and start/end dates.
+            
+            // TODO check on how the credit memo stuff will affect calculations for future opps. 
+            
+            String accountProductQuery = 'Opportunity.AccountId AccountId, Product2Id, SUM(ARR__c) ARR, SUM(ACV__c) ACV '
+                +'FROM OpportunityLineItem '
+                +'WHERE Opportunity.AccountId IN :acctIds '
+                +'AND Opportunity.StageName = \'Purchase\' '
+                +'AND ServiceDate != Null AND ServiceEndDate__c != Null '
+                +'AND Opportunity.Returned_Or_CM__c = False ';
+            String expSelect = 'SELECT CALENDAR_MONTH(Renewal_Start_Date__c) Month, CALENDAR_YEAR(Renewal_Start_Date__c) Year, ';
+            String newSelect ='SELECT CALENDAR_MONTH(ServiceDate) Month, CALENDAR_YEAR(ServiceDate) Year, ';
+            String expGroupBy = 'GROUP BY Opportunity.AccountId, Product2Id, CALENDAR_MONTH(Renewal_Start_Date__c), CALENDAR_YEAR(Renewal_Start_Date__c)';
+            String newGroupBy = 'GROUP BY Opportunity.AccountId, Product2Id, CALENDAR_MONTH(ServiceDate), CALENDAR_YEAR(ServiceDate)';
+            
+            
+            List<AggregateResult> expiredProducts = Database.query(expSelect + accountProductQuery + expGroupBy);
+            List<AggregateResult> newProducts = Database.query(newSelect + accountProductQuery + newGroupBy);
+            
+            // For the new and expiring product aggregations, index the results with a composite key of accountId and product code.
+            // The values of these keys are maps of month/year to ARR.
+            // The month/year keys are number of months after 12 months ago. For instance, if a date was from 13 months ago, it's month/year key would be -1.
+            
+            Map<String,Map<Integer,Map<String,Decimal>>> expiredAccountProd = mapProductsToMonth(expiredProducts);
+            Map<String,Map<Integer,Map<String,Decimal>>> newAccountProd = mapProductsToMonth(newProducts);
+            
+            System.debug('expiredProducts: '+expiredProducts);
+            System.debug('newProducts: '+newProducts);
+            System.debug('expiredAccountProd: '+expiredAccountProd);
+            System.debug('newAccountProd: '+newAccountProd);
+            
+            
+            // Aggregate the ARR of all opportunity products related to opportunities that have opportunity products with start dates that are in the same month as the
+            // minimum product start date on the trigger opportunity. Group these by account, opportunity, product and month/year of start date.
+            
+            
+            //OPTIONAL INSTEAD OF GROUPING BY ID: create currency formula field that will have the adjusted arr if the adjusted_arr__c field is not null, else it will take the arr__c, then replace the SUM(ARR__c) with SUM(arr formual field)
+            
+            List<AggregateResult> oppProducts = [SELECT Id, CALENDAR_MONTH(ServiceDate) Month, CALENDAR_YEAR(ServiceDate) Year, 
+                                                 Opportunity.AccountId AccountId, OpportunityId, Product2Id ProductId, Product2.Family Family,
+                                                 SUM(ARR__c) ARR, SUM(ACV__c) ACV
+                                                 FROM OpportunityLineItem WHERE OpportunityId IN :batchOppIds AND Id IN :oppLineItems
+                                                 GROUP BY Id, Opportunity.AccountId, OpportunityId, Product2Id, Product2.Family,
+                                                 CALENDAR_MONTH(ServiceDate), CALENDAR_YEAR(ServiceDate)];
+            
+            //OpportunityId + Product2Id / CALENDAR_MONTH(ServiceDate)
+            //formula on opportunity line item to see if oli has adjusted arr if so, aggregate that field, if not aggregate arr__c
+            
+            System.debug('oppProducts: '+oppProducts);
+            
+            Map<String, Revenue_Bucket__c> revBucketMap = new Map<String, Revenue_Bucket__c>();
+            
+            for(AggregateResult ar : oppProducts){
+                
+                System.debug('ar: '+ar);
+                
+                String oppId = (String)ar.get('OpportunityId');
+                Opportunity opp = oppMap.get(oppId);
+                Id comSumId = comSumMap.get(oppId);
+                Id ownerId = opp.OwnerId;
+                String family = (String)ar.get('Family');
+                String productId = (String)ar.get('ProductId');
+                String accountProdKey = (String)ar.get('AccountId')+ productId;
+                Integer year = (Integer)ar.get('Year');
+                Integer month = (Integer)ar.get('Month');
+                Date closeDate = opp.Credited_Opportunity__c != Null ? opp.Credited_Opportunity__r.CloseDate : opp.CloseDate;
+                Integer closeDateYear = closeDate.year();
+                Integer closeDateMonth = closeDate.month();
+                if(year == Null || month == Null){
+                    year = closeDateYear;
+                    month = closeDateMonth;
+                }
+                Integer currMonthKey = year * 12 + month;
+                Integer closeDateKey = closeDateYear * 12 + closeDateMonth;
+                String acctProdMonthKey = accountProdKey + String.valueOf(currMonthKey);
+                
+                System.debug('currMonthKey: '+oppProducts);
+                System.debug('closeDateKey: '+oppProducts);
+                System.debug('acctProdMonthKey: '+oppProducts);
+                
+                Boolean hasExpiredProd = expiredAccountProd.containsKey(accountProdKey);
+                Boolean hasNewProd = newAccountProd.containsKey(accountProdKey);
+                
+                System.debug('hasExpiredProd: '+hasExpiredProd);
+                System.debug('hasNewProd: '+hasNewProd);
+                
+                Map<Integer,Map<String,Decimal>> expiredProdRevenue = hasExpiredProd ? expiredAccountProd.get(accountProdKey) : new Map<Integer,Map<String,Decimal>>();
+                
+                System.debug('expiredProdRevenue: '+expiredProdRevenue);
+                
+                Decimal currMonthExpARR = 0;
+                Decimal currMonthExpACV = 0;
+                Map<String, Decimal> currMonthExpRev = new Map<String, Decimal>();
+                
+                System.debug('acctProdMonthRenewal: '+acctProdMonthRenewal);
+                
+                if(acctProdMonthRenewal.containsKey(acctProdMonthKey)){
+                    currMonthExpRev = acctProdMonthRenewal.get(acctProdMonthKey);
+                    currMonthExpARR = currMonthExpRev.get('ARR');
+                    currMonthExpACV = currMonthExpRev.get('ACV');
+                }
+                else if(expiredProdRevenue.containsKey(currMonthKey)){
+                    currMonthExpRev = expiredProdRevenue.get(currMonthKey);
+                    currMonthExpARR = currMonthExpRev.get('ARR');
+                    currMonthExpACV = currMonthExpRev.get('ACV');
+                }
+              
+                
+                //check opp line item id in oppLineItems
+                String oliID = (string)ar.get('Id');
+                
+                
+                //OLI id: 4324324 -  GG-ADM - original arr: $1000 , $200. 
+                //4324324 : $800
+                
+                
+                //checking the adjusted arr/acv from district rollups
+                Decimal arr = renewalExpOppLineItemsAdjustedARR.containsKey(oliID) ? renewalExpOppLineItemsAdjustedARR.get(oliID) : (Decimal)ar.get('ARR');
+                Decimal acv = renewalExpOppLineItemsAdjustedACV.containsKey(oliID) ? renewalExpOppLineItemsAdjustedACV.get(oliID) : (Decimal)ar.get('ACV');
+                
+                System.debug('arr: '+arr);
+                System.debug('acv: '+acv);
+                
+                String renewalType = '';
+                Date renewalDate = Date.newInstance(year, month, 1);
+                
+                if(currMonthKey < closeDateKey){
+                    renewalType = 'Late Renewal';
+                    renewalDate = opp.Credited_Opportunity__c == Null ? opp.CloseDate : opp.Credited_Opportunity__r.CloseDate;
+                }
+                else if(currMonthKey == closeDateKey){
+                    renewalType = 'On Time Renewal';
+                }
+                else{
+                    renewalType = 'Early Renewal';
+                }
+                String renewalKey = oppId + productId + renewalType + String.valueOf(renewalDate);
+                Boolean cm = renewalDate.month() == tday.month() && renewalDate.year() == tday.year();
+                Boolean nm = renewalDate.month() == tday.addMonths(1).month() && renewalDate.year() == tday.addMonths(1).year();
+                Boolean cq = renewalDate >= qtr.StartDate && renewalDate <= qtr.EndDate;
+                
+                System.debug('currMonthExpARR: '+currMonthExpARR);
+                
+                if(currMonthExpARR > 0){                    
+                    
+                    Revenue_Bucket__c renewalBucket = new Revenue_Bucket__c();
+                    
+                    if(revBucketMap.containsKey(renewalKey)){
+                        renewalBucket = revBucketMap.get(renewalKey);    
+                    }
+                    else {
+                        renewalBucket = newRevenueBucket(oppId,productId,family,ownerId,renewalType,renewalDate,comSumId);
+                        renewalBucket.Current_Month__c = cm;
+                        renewalBucket.Current_Quarter__c = cq;
+                        renewalBucket.Next_Month__c = nm;
+                        renewalBucket.Expiring_ARR__c = currMonthExpARR;
+                        renewalBucket.Expiring_ACV__c = currMonthExpACV;
+                    }
+                    
+                    renewalBucket.ARR__c = Math.min(arr,currMonthExpARR);
+                    
+                    revBucketMap.put(renewalKey, renewalBucket);
+                    
+                    Decimal netARR = arr - currMonthExpARR;
+                    
+                    System.debug('netARR: '+netARR);
+                    
+                    // If there is leftover ARR
+                    if(netARR >= 0){
+                        // Set the remaining expiring ARR to zero
+                        currMonthExpARR = 0;
+                        // Set the remaining ARR to the netARR
+                        arr = netARR;
+                    }
+                    // If there is no more ARR leftover
+                    else{
+                        // Set the value of expiring ARR to the remaining expiring ARR
+                        currMonthExpARR = -1 * netARR;
+                        // Set the remaining ARR to zero
+                        arr = 0;
+                    }
+                    
+                    currMonthExpRev.put('ARR',currMonthExpARR);
+                    acctProdMonthRenewal.put(acctProdMonthKey,currMonthExpRev);
+                }
+                
+                // If after taking renewal into account, there is still left over ARR, it should go toward recapture and expansion.
+                // Recapture is prioritized over expansion. Recapture is tracked across opps so churn that is recaped on one opp is 
+                // not double counted on another.
+                
+                if(arr != 0){
+                    Decimal churn = 0;
+                    if(hasExpiredProd){
+                        Map<Integer,Map<String,Decimal>> newProdRevenue = hasNewProd ? newAccountProd.get(accountProdKey) : new Map<Integer,Map<String,Decimal>>();
+                        // Calculate churn for the previous 2 months. Churn is always <= 0.
+                        for(Integer i = currMonthKey - 2; i < currMonthKey; i++){
+                            Map<String, Decimal> expRevMap = expiredProdRevenue.containsKey(i) ? expiredProdRevenue.get(i) : new Map<String, Decimal>();
+                            Decimal expiredARR = expRevMap.containsKey('ARR') ? expRevMap.get('ARR') : 0;
+                            Map<String, Decimal> newRevMap = newProdRevenue.containsKey(i) ? newProdRevenue.get(i) : new Map<String, Decimal>();
+                            Decimal newARR = newRevMap.containsKey('ARR') ? newRevMap.get('ARR') : 0;
+                            churn = churn - expiredARR + newARR > 0 ? 0 : churn - expiredARR + newARR;
+                        }
+                    }
+                    if(churn < 0){
+                        Map<String,Decimal> currRecapRev = acctProdMonthRecap.containsKey(acctProdMonthKey) ? acctProdMonthRecap.get(acctProdMonthKey) : new Map<String,Decimal>();
+                        Decimal currRecapARR = currRecapRev.containsKey('ARR') ? currRecapRev.get('ARR') : 0;
+                        String recapKey = oppId + productId + 'Recapture';
+                        Revenue_Bucket__c recapBucket = new Revenue_Bucket__c();
+                        recapBucket = revBucketMap.containsKey(recapKey) ? revBucketMap.get(recapKey) : newRevenueBucket(oppId,productId,family,ownerId,'Recapture',closeDate,comSumId);
+                        
+                        if(arr + currRecapARR + churn < 0){
+                            recapBucket.ARR__c += arr;
+                            currRecapARR += arr;
+                            arr = 0;
+                        }
+                        else{
+                            recapBucket.ARR__c += -1 * (churn + currRecapARR);
+                            currRecapARR = -1 * churn;
+                            arr += churn;
+                        }
+                        currRecapRev.put('ARR',currRecapARR);
+                        acctProdMonthRecap.put(acctProdMonthKey,currRecapRev);
+                        System.debug('Recap Bucket: '+recapBucket);
+                        revBucketMap.put(recapKey,recapBucket);
+                    }
+                    // Left over ARR is counted as expansion.
+                    System.debug('arr: '+arr);
+                    if(arr > 0){
+                        String expKey = oppId + productId + 'Expansion';
+                        Revenue_Bucket__c expRevBucket = new Revenue_Bucket__c();
+                        expRevBucket = revBucketMap.containsKey(expKey) ? revBucketMap.get(expKey) : newRevenueBucket(oppId,productId,family,ownerId,'Expansion',closeDate,comSumId);
+                        System.debug('expRevBucket: '+expRevBucket);
+                        expRevBucket.ARR__c += arr;
+                        System.debug(' expRevBucket.ARR__c: '+ expRevBucket.ARR__c);
+                        revBucketMap.put(expKey,expRevBucket);
+                    }
+                }
+                
+                if(currMonthExpACV > 0){
+                    
+                    Revenue_Bucket__c renewalBucket = new Revenue_Bucket__c();
+                    
+                    if(revBucketMap.containsKey(renewalKey)){
+                        renewalBucket = revBucketMap.get(renewalKey);
+                    }
+                    else{
+                        renewalBucket = newRevenueBucket(oppId,productId,family,ownerId,renewalType,renewalDate,comSumId);
+                        renewalBucket.Expiring_ARR__c = currMonthExpARR;
+                        renewalBucket.Expiring_ACV__c = currMonthExpACV;
+                        renewalBucket.Current_Month__c = cm;
+                        renewalBucket.Next_Month__c = nm;
+                        renewalBucket.Current_Quarter__c = cq;
+                    }
+                    
+                    renewalBucket.ACV__c=Math.min(acv,currMonthExpACV);
+                    
+                    revBucketMap.put(renewalKey,renewalBucket);                                        
+                    
+                    
+                    Decimal netACV = acv - currMonthExpACV;
+                    
+                    // If there is leftover ACV
+                    if(netACV >= 0){
+                        // Set the remaining expiring ACV to zero
+                        currMonthExpACV = 0;
+                        // Set the remaining ACV to the netACV
+                        acv = netACV;
+                    }
+                    // If there is no more ACV leftover
+                    else{
+                        // Set the value of expiring ACV to the remaining expiring ACV
+                        currMonthExpACV = -1 * netACV;
+                        // Set the remaining ACV to zero
+                        acv = 0;
+                    }
+                    
+                    currMonthExpRev.put('ACV',currMonthExpACV);
+                    acctProdMonthRenewal.put(acctProdMonthKey,currMonthExpRev);
+                    
+                }
+                
+                // If after taking renewal into account, there is still left over ARR, it should go toward recapture and expansion.
+                // Recapture is prioritized over expansion. Recapture is tracked across opps so churn that is recaped on one opp is 
+                // not double counted on another.
+                
+                if(acv != 0){
+                    Decimal churn = 0;
+                    if(hasExpiredProd){
+                        Map<Integer,Map<String,Decimal>> newProdRevenue = hasNewProd ? newAccountProd.get(accountProdKey) : new Map<Integer,Map<String,Decimal>>();
+                        // Calculate churn for the previous 2 months. Churn is always <= 0.
+                        for(Integer i = currMonthKey - 2; i < currMonthKey; i++){
+                            Map<String, Decimal> expRevMap = expiredProdRevenue.containsKey(i) ? expiredProdRevenue.get(i) : new Map<String, Decimal>();
+                            Decimal expiredACV = expRevMap.containsKey('ACV') ? expRevMap.get('ACV') : 0;
+                            Map<String, Decimal> newRevMap = newProdRevenue.containsKey(i) ? newProdRevenue.get(i) : new Map<String, Decimal>();
+                            Decimal newACV = newRevMap.containsKey('ACV') ? newRevMap.get('ACV') : 0;
+                            churn = churn - expiredACV + newACV > 0 ? 0 : churn - expiredACV + newACV;
+                        }
+                    }
+                    if(churn < 0){
+                        Map<String,Decimal> currRecapRev = acctProdMonthRecap.containsKey(acctProdMonthKey) ? acctProdMonthRecap.get(acctProdMonthKey) : new Map<String,Decimal>();
+                        Decimal currRecapACV = currRecapRev.containsKey('ACV') ? currRecapRev.get('ACV') : 0;
+                        String recapKey = oppId + productId + 'Recapture';
+                        Revenue_Bucket__c recapBucket = new Revenue_Bucket__c();
+                        recapBucket = revBucketMap.containsKey(recapKey) ? revBucketMap.get(recapKey) : newRevenueBucket(oppId,productId,family,ownerId,'Recapture',closeDate,comSumId);
+                        
+                        
+                        if(acv + currRecapAcv + churn < 0){
+                            recapBucket.ACV__c += acv;
+                            currRecapACV += acv;
+                            acv = 0;
+                        }
+                        else{
+                            recapBucket.ACV__c += -1 * (churn + currRecapAcv);
+                            currRecapACV = -1 * churn;
+                            acv += churn;
+                        }
+                        currRecapRev.put('ACV',currRecapACV);
+                        acctProdMonthRecap.put(acctProdMonthKey,currRecapRev);
+                        revBucketMap.put(recapKey,recapBucket);
+                    }
+                    // Left over ACV is counted as expansion.
+                    if(acv > 0){
+                        String expKey = oppId + productId + 'Expansion';
+                        Revenue_Bucket__c expRevBucket = new Revenue_Bucket__c();
+                        expRevBucket = revBucketMap.containsKey(expKey) ? revBucketMap.get(expKey) : newRevenueBucket(oppId,productId,family,ownerId,'Expansion',closeDate,comSumId);
+                        
+                        expRevBucket.ACV__c += acv;
+                        revBucketMap.put(expKey,expRevBucket);
+                    }
+                }
+            }
+            
+            try{
+                List<Revenue_Bucket__c> revBuckets = revBucketMap.values();
+                if(revBuckets.size() > 0){
+                    
+                    List<Revenue_Bucket__c> oldRevBuckets = [SELECT ID FROM Revenue_Bucket__c 
+                                                             WHERE Primary__c = True
+                                                             AND Opportunity__c IN :batchOppIds
+                                                             AND (Type__c LIKE '%Renewal%' 
+                                                                  OR Type__c = 'Recapture' 
+                                                                  OR Type__c = 'Expansion')];
+                    
+                    if(oldRevBuckets.size() > 0){
+                        for(Revenue_Bucket__c rB : oldRevBuckets){
+                            rB.Primary__c = False;
+                        }
+                        update oldRevBuckets;
+                    }
+                    insert revBuckets;
+                }
+            }
+            catch(Exception err){
+                System.debug('Problem inserting revenue buckets');
+                System.debug('Error Message: '+err.getMessage());
+                System.debug('Stack Trace: '+err.getStackTraceString());
+                
+                errorLog.add('Error Message: '+err.getMessage()+'\nStack Trace: '+err.getStackTraceString());
+            }
+            
+        }
+        catch(Exception err){
+            System.debug('Error Message: '+err.getMessage());
+            errorLog.add('Error Message: '+err.getMessage()+'\nStack Trace: '+err.getStackTraceString());
+            
+        }
+        System.debug('End Time: '+Limits.getCpuTime());
+        System.debug('Limit Time: '+Limits.getLimitCpuTime());
+    }
+    
+    public void finish(Database.BatchableContext BC){
+        if(errorLog.size() > 0){
+            Error_Log_Handler.errorHandler('BatchRenExpRevCalc', String.join(errorLog, '\n\n'));
+        }
+        String query = 'SELECT Id FROM Commission_Summary__c WHERE Opportunity__r.CloseDate = THIS_YEAR';
+        //Database.executeBatch(new BatchRevBucketSummary(query,True));
+    }
+}
