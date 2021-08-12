@@ -5,6 +5,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
     public Set<Id> renewalExpOppLineItems = new Set<Id>();
     public Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR = new Map<ID,Decimal>();
     public Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV = new Map<ID,Decimal>();
+    public Set<ID> districtRollUpRevBucketIds = new Set<ID>();
     public List<String> errorLog = new List<String>();
     public String batchQuery;
     public Map<Id,Id> comSumMap = new Map<Id,Id>();
@@ -148,7 +149,7 @@ system.debug('term: '+ term);
         return term;
     }
     
-    public static Map<String,Revenue_Bucket__c> updateRevBucketMap(Map<String,Revenue_Bucket__c> revBucketMap, OpportunityLineItem oli,String revType,Decimal arr,Decimal acv, Id comSumId, String districtRollupKey){
+    public static Map<String,Revenue_Bucket__c> updateRevBucketMap(Map<String,Revenue_Bucket__c> revBucketMap, OpportunityLineItem oli,String revType,Decimal arr,Decimal acv, Id comSumId, String districtRollupKey, Boolean isDistrictRollup){
         
         system.debug('ENTERING updateRevBucketMap: ');
         
@@ -169,7 +170,13 @@ system.debug('term: '+ term);
                                                                                                                                       Product__c=productId,
                                                                                                                                       Product_Family__c=oli.Product2.Family,
                                                                                                                                       Date__c=closeDate,
+                                                                                                                                      From_District_Rollup__c = isDistrictRollup,
                                                                                                                                       Commission_Summary__c=comSumId);
+        
+
+        
+        system.debug('isDistrictRollup: ' + isDistrictRollup);
+        system.debug('revBucket.From_District_Rollup__c: ' + revBucket.From_District_Rollup__c);
         Decimal currArr = revBucket.ARR__c == Null ? 0 : revBucket.ARR__c;
         currArr += arr;
         Decimal currAcv = revBucket.ACV__c == Null ? 0 : revBucket.ACV__c;
@@ -246,6 +253,8 @@ system.debug('term: '+ term);
         
         String revType = '';
         
+        Boolean isDistrictRollup;
+        
         
         if(accountDistrictRollupProductDateMap_ARR.containsKey(districtRollupKey)){
             
@@ -258,14 +267,16 @@ system.debug('term: '+ term);
             
             Integer counter = 0;
             
-            for (String key : distrRollUpMap.keySet()){
+            
+            
+            for (String revTypeKey : distrRollUpMap.keySet()){
                 
-                system.debug('key: '+ key);
+                system.debug('revType: '+ revTypeKey);
                 system.debug('counter: '+ counter);
                 
                 
-                Decimal districtRollupARR = distrRollUpMap.get(key);
-                Decimal districtRollupACV = distrRollUpMap_ACV.get(key);
+                Decimal districtRollupARR = distrRollUpMap.get(revTypeKey);
+                Decimal districtRollupACV = distrRollUpMap_ACV.get(revTypeKey);
                 
                 system.debug('districtRollupARR: '+ districtRollupARR);
                 system.debug('districtRollupACV: '+ districtRollupACV);
@@ -278,8 +289,11 @@ system.debug('term: '+ term);
                 system.debug('arr: '+ arr);
                 system.debug('acv: '+ acv);
                 
+                isDistrictRollup = TRUE;
+                
                 //build additional map with acv -- mirror arr map -- creating revenue bucket
-                revBucketMap = updateRevBucketMap(revBucketMap,oli,key,districtRollupARR,districtRollupACV,comSumId,districtRollupKey);
+                revBucketMap = updateRevBucketMap(revBucketMap,oli,revTypeKey,districtRollupARR,districtRollupACV,comSumId,districtRollupKey, isDistrictRollup);
+                
                 
                 //update adjusted arr field which will be passed to batchrenexprevcalc class
                 oli.Adjusted_ARR__c = arr;
@@ -426,7 +440,7 @@ system.debug('term: '+ term);
         }
         
         if(revType != ''){
-            revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId,districtRollupKey);
+            revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId,districtRollupKey, isDistrictRollup);
         }
         
         system.debug('revType: '+ revType);
@@ -923,7 +937,26 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
                                                      AND ((Type__c = 'Site Cross Sell' OR Type__c = 'New' OR Type__c = 'Cross Sell' OR Type__c = 'Site Expansion' OR Type__c = 'Up Sell') 
                                                           OR (NOT Opportunity__c IN :renewalExpOppIds))];
             
+
+            
             insert revBucketMap.values();
+            
+            system.debug('revBucketMap: '+revBucketMap);
+            system.debug('revBucketMap.values(): '+revBucketMap.values());
+            
+            for(Revenue_Bucket__c revBucket : revBucketMap.values()){
+                
+                system.debug('revBucket: '+revBucket);
+                if(revBucket.From_District_Rollup__c == TRUE){
+                    
+                    districtRollUpRevBucketIds.add(revBucket.id);
+                }
+                
+            }
+            
+            system.debug('districtRollUpRevBucketIds: '+districtRollUpRevBucketIds);
+            
+            system.debug('oldRevBuckets: '+oldRevBuckets);
             
             if(oldRevBuckets.size() > 0){
                 
@@ -946,7 +979,7 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
     public void finish(Database.BatchableContext BC){
         
         if(renewalExpOppIds.size() > 0){
-            Database.executeBatch(new BatchRenExpRevCalc(renewalExpOppIds,renewalExpOppLineItems,comSumMap, renewalExpOppLineItemsAdjustedARR, renewalExpOppLineItemsAdjustedACV),10);
+            Database.executeBatch(new BatchRenExpRevCalc(renewalExpOppIds,renewalExpOppLineItems,comSumMap, renewalExpOppLineItemsAdjustedARR, renewalExpOppLineItemsAdjustedACV, districtRollUpRevBucketIds),10);
         }
         else{
             String query = 'SELECT Id FROM Commission_Summary__c WHERE Opportunity__r.CloseDate = THIS_YEAR';
