@@ -1,0 +1,1049 @@
+public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.Stateful{
+    
+    public Set<Id> oppIds;
+    public Set<Id> renewalExpOppIds = new Set<Id>();
+    public Set<Id> renewalExpOppLineItems = new Set<Id>();
+    public Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR = new Map<ID,Decimal>();
+    public Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV = new Map<ID,Decimal>();
+    public Set<ID> districtRollUpRevBucketIds = new Set<ID>();
+    public List<String> errorLog = new List<String>();
+    public String batchQuery;
+    public Map<Id,Id> comSumMap = new Map<Id,Id>();
+    
+    public BatchRevBucketCalc(Set<Id> oppIds){
+        this.batchQuery = '';
+        this.oppIds = oppIds;
+    }
+    
+    public BatchRevBucketCalc(String batchQuery){
+        this.batchQuery = batchQuery;
+        this.oppIds = new Set<Id>();
+    }
+    
+    
+    // Before executing, make sure Super Account is on the account
+    public Database.QueryLocator start(Database.BatchableContext BC){
+        
+        String query = 'SELECT Id, AccountId, OwnerId, Account.SuperAccount__c FROM Opportunity WHERE Id IN :oppIds';
+        
+        Database.QueryLocator qL = batchQuery == '' && oppIds.size() > 0 ? Database.getQueryLocator(query) : Database.getQueryLocator(batchQuery);
+        
+        return qL;
+    }
+    
+    
+    // Get all of the opportunity products that are related to super accounts.
+    // Iterate through each and if there is a gap between two dates
+    
+    // Query all opportunity products related to a super account and sort by start date
+    // As you iterate through each make a Map for Super Account, Account, and Account Product
+    // The Super Account will be used to find New Hierarchy
+    // The Account will be used to find Site Expansion
+    // The AccountProduct will be used to find Cross Sell and Up Sell
+    
+    /* Query for getting opportunity Products with superAccounts
+* 
+* Considerations:
+* + Must Account for Pear Deck
+*   - Pear Deck Opportunity Products should only couunt towards an accounts first booking date or active date if they start after Jan 1
+*   - Run a separate deal Pear Deck on it's own
+*   - Both GG and Pear Deck should only be counted as cross sell if someone purchased GG before
+*   
+* + Exclude Pilots
+*   - Excluding Opportunities with Amount <= 1
+* + Account for Active Date for 379
+*/
+    
+    public static Map<String,Map<String, Date>> getRevDates(Map<String,List<List<Date>>> dateMap){
+        
+        //Example: GG-ADM SD:12-12-2020 ED: 11-30-2021 CD: 3-15-2021 AccID: 001410000087fdgAAA SuperAcctID:a714N0000000JRfQAM ProdID:01t41000000gS9OAAU
+        
+        system.debug('ENTERING getRevDates:');
+        
+        system.debug('dateMap: '+dateMap);
+        
+        Map<String,Map<String, Date>> resultMap = new Map<String,Map<String, Date>>();
+        for(String key : dateMap.keySet()){
+            List<List<Date>> contracts = dateMap.get(key);
+            Date firstBookingDate = null;
+            Date maxEndDate = null;
+            Date activeDate = null;
+            for(Integer i = 0 ; i < contracts.size(); i++){
+                List<Date> dates = contracts[i];
+                Date startDate = dates[0];
+                Date endDate = dates[1];
+                Date minDate = dates[2];
+                if(i == 0){
+                    firstBookingDate = startDate;
+                    maxEndDate = endDate;
+                    activeDate = minDate;
+                }
+                else {
+                    if(startDate > maxEndDate + 365){
+                        firstBookingDate = startDate;
+                    }
+                    if(minDate > maxEndDate + 365){
+                        activeDate = minDate;
+                    }
+                    if(endDate > maxEndDate){
+                        maxEndDate = endDate;
+                    }
+                }
+                
+            }
+            resultMap.put(key,new Map<String, Date>{
+                'FBD' => firstBookingDate,
+                    'MED' => maxEndDate,
+                    'AD' => activeDate
+                    });
+        }
+        
+        system.debug('resultMap: '+resultMap);
+        return resultMap;
+    }
+    
+    public static Decimal getTermFromDates(Date startDate, Date endDate){
+        
+        system.debug('ENTERING getTermFromDates:');
+        
+        Integer yearEnd = endDate.year();
+        Integer yearStart = startDate.year();
+        
+        system.debug('yearEnd: '+ yearEnd);
+        
+        system.debug('yearStart: '+ yearStart);
+        
+        Integer midTerm = yearEnd > yearStart ? yearEnd - yearStart - 1 : 0;
+        
+        system.debug('midTerm: '+ midTerm);
+        
+        // Get days from start til end of year adjust for leap year
+        Integer rawDaysStartYr = startDate.daysBetween(Date.newInstance(yearStart,12,31));
+        Integer adjustedDaysStartYr = startDate < Date.newInstance(yearStart,3,1) && Date.isLeapYear(yearStart) ? rawDaysStartYr - 1 : rawDaysStartYr;
+        
+        Integer rawDaysEndYr = endDate.dayOfYear();
+        Integer adjustedDaysEndYr = endDate >= Date.newInstance(yearEnd,3,1) && Date.isLeapYear(yearEnd) ? rawDaysEndYr - 1 : rawDaysEndYr;
+        
+        Decimal rawSum = (Decimal.valueOf(adjustedDaysStartYr) + Decimal.valueOf(adjustedDaysEndYr));
+        Decimal adjustedSum = yearEnd == yearStart ? rawSum - 365 : rawSum;
+        
+        Decimal term = midTerm +  adjustedSum/364;
+        
+        /*
+
+system.debug('rawDaysStartYr: '+ rawDaysStartYr);
+
+system.debug('adjustedDaysStartYr: '+ adjustedDaysStartYr);
+
+system.debug('rawDaysEndYr: '+ rawDaysEndYr);
+
+system.debug('adjustedDaysEndYr: '+ adjustedDaysEndYr);
+
+system.debug('rawSum: '+ rawSum);
+
+system.debug('adjustedSum: '+ adjustedSum);
+
+system.debug('term: '+ term);
+*/
+        
+        return term;
+    }
+    
+    public static Map<String,Revenue_Bucket__c> updateRevBucketMap(Map<String,Revenue_Bucket__c> revBucketMap, OpportunityLineItem oli,String revType,Decimal arr,Decimal acv, Id comSumId, String districtRollupKey, Boolean isDistrictRollup){
+        
+        system.debug('ENTERING updateRevBucketMap: ');
+        
+        // Assuming that revType is in the rev bucket type picklist... add some validation to check that
+        String oppId = String.valueOf(oli.OpportunityId);
+        String productId = String.valueOf(oli.Product2Id);
+        Date closeDate = oli.Opportunity.CloseDate;
+        
+        //revBucketKey = unique combination of oppID + productId + revType
+        //NEED TO ADD UNIQUE IDENTIFIER TO THIS VARIABLE FOR DISTRICT ROLLUPS
+        String revBucketKey = oppId + productId + revType + districtRollupKey;
+        Boolean isPrimary = revType != 'Site Cross Sell';
+        Revenue_Bucket__c revBucket = revBucketMap.containsKey(revBucketKey) ? revBucketMap.get(revBucketKey) : new Revenue_Bucket__c(Primary__c=isPrimary,
+                                                                                                                                      Commissions_Exception__c=!isPrimary,
+                                                                                                                                      Type__c=revType,
+                                                                                                                                      Opportunity_Owner__c=oli.Opportunity.OwnerId,
+                                                                                                                                      Opportunity__c=oppId,
+                                                                                                                                      Product__c=productId,
+                                                                                                                                      Product_Family__c=oli.Product2.Family,
+                                                                                                                                      Date__c=closeDate,
+                                                                                                                                      From_District_Rollup__c = isDistrictRollup,
+                                                                                                                                      Commission_Summary__c=comSumId);
+        
+        
+        
+
+        If(isDistrictRollup == TRUE){
+        
+        	revBucket.District_Rollups__c = revBucket.District_Rollups__c + ' ' + districtRollupKey + ', ';
+            }
+        
+        system.debug('isDistrictRollup: ' + isDistrictRollup);
+        system.debug('revBucket.From_District_Rollup__c: ' + revBucket.From_District_Rollup__c);
+        Decimal currArr = revBucket.ARR__c == Null ? 0 : revBucket.ARR__c;
+        currArr += arr;
+        Decimal currAcv = revBucket.ACV__c == Null ? 0 : revBucket.ACV__c;
+        currAcv += acv;
+        revBucket.ARR__c = currArr;
+        revBucket.ACV__c = currAcv;
+        revBucketMap.put(revBucketKey,revBucket);
+        
+        
+        return revBucketMap;
+    }
+    
+    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, Map<String,Map<String,Date>> accountProductResultMap, OpportunityLineItem oli, Id comSumId, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ARR, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ACV ){
+        
+        system.debug('ENTERING bucketRevenue: '); 
+        
+        Map<String, Object> returnMap = new Map<String,Object>();
+        
+        // Determine revenue type based on inclusive 30 day window after first booking dates
+        String superId = String.valueOf(oli.Opportunity.Account.SuperAccount__c);
+        String productId = String.valueOf(oli.Product2Id);
+        String superProductId = superId + productId;
+        String accountId = String.valueOf(oli.Opportunity.AccountId);
+        String accountProductId = accountId + productId;
+        String oppId = String.valueOf(oli.OpportunityId);
+        Date startDate = oli.ServiceDate;
+        Date endDate = oli.ServiceEndDate__c;
+        Date closeDate = oli.Opportunity.CloseDate;
+        
+        String districtRollupKey = oppId + productId;
+        
+        system.debug('districtRollupKey: '+ districtRollupKey);
+        
+        system.debug('superResultMap: '+ superResultMap);
+        
+        system.debug('revBucketMap: '+ revBucketMap);
+        
+        system.debug('superProductResultMap: '+ superProductResultMap);
+        
+        system.debug('accountResultMap: '+ accountResultMap);
+        
+        system.debug('accountProductResultMap: '+ accountProductResultMap);
+        
+        system.debug('superID: '+ superId);
+        system.debug('productId: '+ productId);
+        system.debug('superProductId: '+ superProductId);
+        system.debug('accountId: '+ accountId);
+        system.debug('accountProductId: '+ accountProductId);
+        system.debug('oppId: '+ oppId);
+        system.debug('startDate: '+ startDate);
+        system.debug('endDate: '+ endDate);
+        system.debug('closeDate: '+ closeDate);
+        
+        
+        if(startDate == Null){
+            startDate = closeDate;
+            endDate = startDate.addYears(1) - 1;
+        }
+        if(endDate == Null){
+            endDate = startDate.addYears(1) - 1;
+        }
+        
+        // Calculate arr
+        Decimal term = getTermFromDates(startDate,endDate);
+        Decimal arr = oli.TotalPrice / term;            
+        // Calculate oli ACV
+        Decimal acv = term < 1 ? oli.TotalPrice : arr;
+        
+        system.debug('arr before district roll up: '+ arr);
+        
+        system.debug('accountDistrictRollupProductDateMap_ARR: '+ accountDistrictRollupProductDateMap_ARR);
+        
+        system.debug('districtRollupKey: '+ districtRollupKey);
+        
+        String revType = '';
+        
+        Boolean isDistrictRollup;
+        
+        
+        if(accountDistrictRollupProductDateMap_ARR.containsKey(districtRollupKey) || accountDistrictRollupProductDateMap_ACV.containsKey(districtRollupKey)){
+            
+           
+            Map<String, Decimal> distrRollUpMap = accountDistrictRollupProductDateMap_ARR.get(districtRollupKey);
+            Map<String, Decimal> distrRollUpMap_ACV = accountDistrictRollupProductDateMap_ACV.get(districtRollupKey);
+            
+            system.debug('distrRollUpMap: '+ distrRollUpMap);
+            system.debug('distrRollUpMap_ACV: '+ distrRollUpMap_ACV);
+            
+            Integer counter = 0;
+            
+            
+            
+            for (String revTypeKey : distrRollUpMap.keySet()){
+                
+                system.debug('revType: '+ revTypeKey);
+                system.debug('counter: '+ counter);
+                
+                
+                Decimal districtRollupARR = distrRollUpMap.get(revTypeKey);
+                Decimal districtRollupACV = distrRollUpMap_ACV.get(revTypeKey);
+                
+                system.debug('districtRollupARR: '+ districtRollupARR);
+                system.debug('districtRollupACV: '+ districtRollupACV);
+                
+                
+                arr = arr - districtRollupARR; 
+                
+                acv = acv - districtRollupACV;
+                
+                system.debug('arr: '+ arr);
+                system.debug('acv: '+ acv);
+                
+                isDistrictRollup = TRUE;
+                
+                //build additional map with acv -- mirror arr map -- creating revenue bucket
+                revBucketMap = updateRevBucketMap(revBucketMap,oli,revTypeKey,districtRollupARR,districtRollupACV,comSumId,districtRollupKey, isDistrictRollup);
+                
+                
+                //update adjusted arr field which will be passed to batchrenexprevcalc class
+                oli.Adjusted_ARR__c = arr;
+                oli.Adjusted_ACV_for_district_rollup__c = acv;
+                
+                counter = counter + 1;
+                
+                
+            }
+            
+            system.debug('counter: '+ counter);
+            
+            //revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId);
+            
+            //return map that has expiring arr in one of three renewal categories
+            //$50 adm arr expiring aug 2021
+            //$50 admin arr expiring oct 2021
+            //Map: 5345432432432 { 'on-time' : 50, 'early' : 50}
+            
+            //apply any dollar to late renewal first, then on time, then early
+            
+            //create rev bucket with renewal type
+            //ex: District first time purchase, purchase $1000 admin, all schools in district already have a total of $100 admin
+            
+            // accountDistrictRollupProductDateMap = Map: 5345432432432 { 'on-time' : 100}
+            // create revenue bucket for line item, rev type is on-time renewal, arr = 100
+            // subtract 100 from the 1000 arr = 900 ---> subtract from arr / acv
+            // 
+            // Expansion example:
+            // If district already has teacher. $100 on-time renewal // $900 license expansion
+            
+            
+            
+            
+        }
+        
+        
+        
+        //oli.Adjusted_ARR__c = arr;
+        
+        system.debug('arr after district roll up if statement: '+arr);
+        system.debug('acv after district roll up if statement: '+acv);
+        
+        
+        
+        //checking if there is a super account. There won't be a super account if there are no purchases
+        if(!superResultMap.containsKey(superId)){
+            revType = 'New';
+            system.debug('revType: '+ revType);
+        }
+        //checking if start date (servicedate) of product is less than or equal to the first booking date for any product in the hierarchy + 30 days
+        else if(startDate <= superResultMap.get(superId).get('FBD').addDays(30)){
+            revType = 'New';
+            system.debug('revType: '+ revType);
+        }
+        
+        //checking if the product itself in the heirarchy - has this product been purchased before in the hierarchy?
+        //Cross-Sell
+        //then checking if the product has an upsell product and if the upsell product has been purchased in the hierarchy
+        //then checking if the start date (service date) is equal to the first booking date + 30
+        //EX: Fleet + Admin
+        // Fleet ID: superProductId = superAccount1234
+        // If superProductResultMap does not contain superAccount1234 ---> Rev Type = Cross-Sell
+        // Then checking if the fleet product has a value in the upsell product field (fleet has Admin in that field)
+        // If the upsell product id is NOT null and the heirarchy has purchased upsellProduct ID (Admin
+        // If yes, then check if the start date (service date) is greater than the first booking date of all Admin products in hierarchy + 30
+        // Purchase Admin: Jan 1 2021; Purchase Fleet Feb 1 2021 --> Upsell (assuming admin purchase was cross-sell) has to be 30 days after Admin purchase
+        else if(!superProductResultMap.containsKey(superProductId)){
+            revType = 'Cross Sell';
+            Id upSellProductId = oli.Product2.Up_Sell_Product__c;
+            if(upSellProductId != Null && superProductResultMap.containsKey(superId + String.valueOf(upSellProductId))){
+                if(startDate > superProductResultMap.get(superId + String.valueOf(upSellProductId)).get('FBD').addDays(30)){
+                    revType = 'Up Sell';
+                    system.debug('revType: '+ revType);
+                }
+            }
+        }
+        
+        //check if the start date (service date) is less than or equal to the first booking date + 30 of all same products
+        //If purchasing GG-ADM, will check the first booking date of only admin products
+        //Same Upsell criteria as before
+        else if(startDate <= superProductResultMap.get(superProductId).get('FBD').addDays(30)){
+            revType = 'Cross Sell';
+            system.debug('revType: '+ revType);
+            Id upSellProductId = oli.Product2.Up_Sell_Product__c;
+            if(upSellProductId != Null && superProductResultMap.containsKey(superId + String.valueOf(upSellProductId))){
+                if(startDate > superProductResultMap.get(superId + String.valueOf(upSellProductId)).get('FBD').addDays(30)){
+                    revType = 'Up Sell';
+                    system.debug('revType: '+ revType);
+                }
+            }
+        }
+        
+        
+        //check to see if account has already purchased before
+        //If this product is on account Seattle Academy, we are checking to see if Seattle Academy has purchased before
+        //If they have purchased before, account would be in the account result map and this would evaluate to false
+        else if(!accountResultMap.containsKey(accountId)){
+            revType = 'Site Expansion';
+            system.debug('revType: '+ revType);
+        }
+        //check if the start date (service date) of the product is less than or equal to the first booking date on the Account + 30 days
+        //Checking the first booking date of Seattle Academy
+        else if(startDate <= accountResultMap.get(accountId).get('FBD').addDays(30)){
+            revType = 'Site Expansion';
+            system.debug('revType: '+ revType);
+        }
+        else{
+            //Site Cross Sell: first time an account has purchased a product where it's not any of the revenue types above (new,cross-sell,site expansion)
+            //Ex: 
+            //School A purchases admin Jan 2020 (start date) - New
+            //School B purchased teacher Jan 2020 (start date) - Cross-Sell
+            //School B purchased admin July 2020 (start date) - Site Cross Sell
+            //
+            //School A purchases admin Jan 2020 (start date) - New
+            //School B purchased teacher Jan 2020 (start date) - Cross-Sell
+            //School B purchased admin July 2021 (start date) - Site Cross-Sell / Expansion
+            //
+            //*NOTE: a product can be site cross sell and expansion so this can get fed into batchrenexprevcal code
+            // Check for account-level cross sell
+            // Check if the account has purchased the same product before
+            if(!accountProductResultMap.containsKey(accountProductId)){
+                revType = 'Site Cross Sell';
+                system.debug('revType: '+ revType);
+            }
+            // Check if the product start date (service date) is less than or equal to the same product first booking date + 30
+            else if(startDate <= accountProductResultMap.get(accountProductId).get('FBD').addDays(30)){
+                revType = 'Site Cross Sell';
+                system.debug('revType: '+ revType);
+            }            
+            // Queue for Renewal/Expansion Calcs
+            
+            returnMap.put('RenExp',oppId);
+            returnMap.put('RenExpLineItem',oli.Id);
+            
+            if(oli.Adjusted_ARR__c != NULL){
+                returnMap.put('RenExpLineItemAdjustedARR',oli.Adjusted_ARR__c);
+            }
+            
+            if(oli.Adjusted_ACV_for_district_rollup__c != NULL){
+                returnMap.put('RenExpLineItemAdjustedACV',oli.Adjusted_ACV_for_district_rollup__c);
+                
+            }
+        }
+        
+        if(revType != ''){
+            revBucketMap = updateRevBucketMap(revBucketMap,oli,revType,arr,acv,comSumId,districtRollupKey, isDistrictRollup);
+        }
+        
+        system.debug('revType: '+ revType);
+        
+        //renewalExpOppLineItemsArrMap.put(oli.id, arr);
+        
+        returnMap.put('RevBuckets',revBucketMap);
+        
+        system.debug('returnMap: '+ returnMap);
+        return returnMap;            
+    }
+    
+    
+    public void execute(Database.BatchableContext BC, List<Opportunity> opps){
+        
+        
+        try{
+            
+            List<Contract> contList = [SELECT ID, SBQQ__Opportunity__c FROM Contract
+                                       WHERE SBQQ__RenewalOpportunity__c in :opps
+                                       AND Site_License_Contract_Lookup__r.id != NULL
+                                       AND SBQQ__Opportunity__r.Returned_Or_CM__c = FALSE];
+            
+            system.debug('contList'+ contList);
+            system.debug('contList.size()'+ contList.size());
+            
+            //contList:
+            // cont 1: GG-ADM ($500) // GG-TCR ($500)
+            // cont 2: GG-PRD ($1000)
+            
+            
+            List<AggregateResult> aggregateDistrictRenewalProducts = [SELECT Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, Renewal_Start_Date__c, SUM(ARR__c) ARR, SUM(ACV__c) ACV 
+                                                                 FROM OpportunityLineItem
+                                                                 WHERE Contract__c in :contList 
+                                                                 AND Opportunity.StageName = 'Purchase'
+                                                                 AND ServiceDate != NULL 
+                                                                 AND ServiceEndDate__c != Null
+                                                                 AND Opportunity.Returned_Or_CM__c = False
+                                                                 GROUP BY Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, Renewal_Start_Date__c];
+            
+            
+            
+            system.debug('aggregateDistrictRenewalProducts'+ aggregateDistrictRenewalProducts);
+            
+            
+            
+            
+            //GG-ADM, July, 2021 / $500
+            //GG-TCR, July, 2021 / $500
+            //GG-PRD, July, 2021 / $1000
+            
+            System.debug('Start CPU Time: '+Limits.getCpuTime());
+            
+            Map<Id,Opportunity> oppMap = new Map<Id,Opportunity>(opps);
+            
+            system.debug('oppMap: '+oppMap);
+            
+            Set<Id> superAccountIds = new Set<Id>();
+            Set<Id> accountIds = new Set<Id>();
+            
+            List<Commission_Summary__c> comSums = [SELECT Id, Opportunity__c FROM Commission_Summary__c WHERE Opportunity__c IN :oppMap.keySet()];
+            for(Commission_Summary__c comSum : comSums){
+                comSumMap.put(comSum.Opportunity__c,comSum.Id);
+            }
+            
+            
+            
+            List<Commission_Summary__c> newComSums = new List<Commission_Summary__c>();
+            
+            for(Opportunity opp : opps){
+                superAccountIds.add(opp.Account.SuperAccount__c);
+                accountIds.add(opp.AccountId);
+                if(!comSumMap.containsKey(opp.Id)){
+                    Commission_Summary__c newComSum = new Commission_Summary__c(Opportunity__c=opp.Id,
+                                                                                Opportunity_Id__c=opp.Id);
+                    newComSums.add(newComSum);
+                }
+            }
+            
+            if(newComSums.size() > 0){
+                insert newComSums;
+                
+                for(Commission_Summary__c comSum : newComSums){
+                    comSumMap.put(comSum.Opportunity__c,comSum.Id);
+                }
+            }
+            
+            system.debug('comSumMap: '+comSumMap);
+            
+            
+            // Exclude Pear Deck before 2021 
+            // Subscription Pricing "Fixed Price" ensures there are dates on the opportunity product
+            // How to account for previous first booking dates. For historical alignment, would it be possible to use an earlier first booking date.
+            // How to handle situation where first booking date > service date :(
+            Date pearDeckCutOverDate = Date.newInstance(2021, 1, 1);
+            
+            List<OpportunityLineItem> lineItems = [SELECT Opportunity.CloseDate, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, Product2Id, 
+                                                   ServiceDate, ServiceEndDate__c, Product2.Family, Opportunity.Credited_Opportunity__r.CloseDate
+                                                   FROM OpportunityLineItem 
+                                                   WHERE Opportunity.StageName = 'Purchase' AND Opportunity.Returned_Or_CM__c = FALSE
+                                                   AND Opportunity.Amount > 1
+                                                   AND Product2.Do_Not_Bucket_Revenue__c = FALSE
+                                                   AND Opportunity.Account.SuperAccount__c IN :superAccountIds
+                                                   AND ServiceDate != Null AND ServiceEndDate__c != Null AND Product2.SBQQ__SubscriptionPricing__c = 'Fixed Price'
+                                                   AND Opportunity.Account.SuperAccount__c != Null
+                                                   ORDER BY ServiceDate];
+            
+            
+            system.debug('lineItems: '+ lineItems);
+            
+            // Key of super date map is the super account id
+            // Key of super account map is the super account id concatenated with the account id
+            // Key of the account product map is the account id concatenated with the product id
+            
+            // Checking for New revenue type
+            Map<String,List<List<Date>>> ggSuperDateMap = new Map<String,List<List<Date>>>();
+            // Checking for Cross-Sell revenue type
+            Map<String,List<List<Date>>> ggSuperProductDateMap = new Map<String,List<List<Date>>>();
+            // Checking for Site Expansion revenue type
+            Map<String,List<List<Date>>> ggAccountDateMap = new Map<String,List<List<Date>>>();
+            
+            Map<String,List<List<Date>>> pdSuperDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> pdSuperProductDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> pdAccountDateMap = new Map<String,List<List<Date>>>();
+            
+            Map<String,List<List<Date>>> superDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> superProductDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> accountDateMap = new Map<String,List<List<Date>>>();
+            
+            
+            // Create maps for account product dates. Used for separating site cross sell at the account level.
+            Map<String,List<List<Date>>> ggAccountProductDateMap = new Map<String,List<List<Date>>>();
+            Map<String,List<List<Date>>> pdAccountProductDateMap = new Map<String,List<List<Date>>>();
+            
+            //checking for Site Cross-Sell revenue type: first purchase of product on account level regardless of district purchase
+            Map<String,List<List<Date>>> accountProductDateMap = new Map<String,List<List<Date>>>();
+            
+            //used for district roll-up
+            //key: composite id of renewalOpportunity + productID;  value:  map of key renewal type + arr
+            Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ARR = new Map<String,Map<String, Decimal>>();
+            
+            //key: composite id of renewalOpportunity + productID;  value:  map of key renewal type + acv
+            Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ACV = new Map<String,Map<String, Decimal>>();
+            
+
+            Decimal allARR = 0;
+            Decimal earlyRenewal_ARR = 0;
+            Decimal onTimeRenewal_ARR = 0;
+            Decimal lateRenewal_ARR = 0;
+            
+            Map<String,Decimal> disrictRollUpAggregate_ARR = new Map<String,Decimal>();
+            Map<String,Decimal> disrictRollUpAggregate_ACV = new Map<String,Decimal>();
+
+
+            
+            for(AggregateResult ar : aggregateDistrictRenewalProducts){
+                
+                system.debug('ar: '+ar);
+                
+                Map<String, Decimal> renewalTypeMap_ARR = new Map<String, Decimal>();
+                Map<String, Decimal> renewalTypeMap_ACV = new Map<String, Decimal>();
+                
+                String compositeKey = (string)ar.get('SBQQ__RenewalOpportunity__c') + (string)ar.get('Product2Id');
+                
+                system.debug('compositeKey: '+compositeKey);
+                
+                String renewalType;
+                
+                //CloseDate: Jan 15 2021 // Renewal start date is Feb 1
+                //april may and june 2021 / 
+                
+                Date closeDate = (date)ar.get('CloseDate');    
+                system.debug('closeDate: '+closeDate);
+                Integer closeDateMonth = closeDate.month();               
+                Integer closeDateYear = closeDate.year();               
+                Date renewalStartDate = (date)ar.get('Renewal_Start_Date__c');              
+                Integer renewalStartDateMonth = renewalStartDate.month();                
+                Integer renewalStartDateYear = renewalStartDate.year();
+                
+                Decimal arr = (decimal)ar.get('ARR') != NULL ? (decimal)ar.get('ARR') : 0;
+                Decimal acv = (decimal)ar.get('ACV') != NULL ? (decimal)ar.get('ACV') : 0;
+                system.debug('arr: '+arr);
+                system.debug('acv: '+acv);
+                system.debug('renewalStartDate: '+renewalStartDate);
+                system.debug('closeDateMonth: '+closeDateMonth);
+                system.debug('closeDateYear: '+closeDateYear);
+                
+                
+                //renewalType = 'Late Renewal';
+                
+                //Early
+                If( Date.newInstance(closeDate.year(), closeDate.month(), 1) < Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
+                    
+                    renewalType = 'Early Renewal';
+                    
+                    earlyRenewal_ARR = earlyRenewal_ARR + arr;
+                    
+                }
+                
+                //On-Time
+                else if ( Date.newInstance(closeDate.year(), closeDate.month(), 1) == Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
+                    
+                    renewalType = 'On Time Renewal';
+                    onTimeRenewal_ARR = onTimeRenewal_ARR + arr;
+                }
+                
+                else if(Date.newInstance(closeDate.year(), closeDate.month(), 1) > Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
+                    
+                    
+                    
+                    renewalType = 'Late Renewal';
+                    lateRenewal_ARR = lateRenewal_ARR + arr;
+                    
+                }
+                
+                
+                system.debug('renewalType: '+renewalType);
+                
+                Decimal standingARR = disrictRollUpAggregate_ARR.containsKey(compositeKey) ? disrictRollUpAggregate_ARR.get(compositeKey) + arr : arr;
+               
+                Decimal standingACV = disrictRollUpAggregate_ARR.containsKey(compositeKey) ? disrictRollUpAggregate_ARR.get(compositeKey) + arr : arr;
+               
+       
+                disrictRollUpAggregate_ARR.put(compositeKey, standingArr);
+                
+                
+                
+                system.debug('standingARR: '+standingARR);
+                system.debug('disrictRollUpAggregate_ARR in LOOP: '+disrictRollUpAggregate_ARR);
+                
+                renewalTypeMap_ARR.put(renewalType,(decimal)ar.get('ARR'));
+                
+                renewalTypeMap_ACV.put(renewalType,(decimal)ar.get('ACV'));
+                
+                system.debug('renewalTypeMap_ARR: '+renewalTypeMap_ARR);
+                system.debug('renewalTypeMap_ACV: '+renewalTypeMap_ACV);
+                
+                accountDistrictRollupProductDateMap_ARR.put(compositeKey,renewalTypeMap_ARR);
+                accountDistrictRollupProductDateMap_ACV.put(compositeKey,renewalTypeMap_ACV);
+                
+               system.debug('IN LOOP: accountDistrictRollupProductDateMap_ARR: '+accountDistrictRollupProductDateMap_ARR);
+               system.debug('IN LOOP: accountDistrictRollupProductDateMap_ACV: '+accountDistrictRollupProductDateMap_ACV);
+                
+                //oppProdid: 23432432342 { 'early' : 3242.33}
+                
+            }
+            
+            
+            system.debug('earlyRenewal_ARR: '+earlyRenewal_ARR);
+            system.debug('onTimeRenewal_ARR: '+onTimeRenewal_ARR);
+            system.debug('lateRenewal_ARR: '+lateRenewal_ARR);
+            
+            allARR = earlyRenewal_ARR + onTimeRenewal_ARR + lateRenewal_ARR;
+            
+            system.debug('allARR: '+allARR);
+            
+            system.debug('disrictRollUpAggregate_ARR: '+disrictRollUpAggregate_ARR);
+            
+
+            
+            system.debug('accountDistrictRollupProductDateMap_ARR: '+accountDistrictRollupProductDateMap_ARR);
+            system.debug('accountDistrictRollupProductDateMap_ACV: '+accountDistrictRollupProductDateMap_ACV);
+            
+            
+            system.debug('lineItems.size(): '+lineItems.size());
+            // Build the maps by adding the start and end dates of each opportunity product to the list being sure to keep them ordered by start date
+            for(Integer i = 0; i < lineItems.size(); i++){
+                OpportunityLineItem lineItem = lineItems[i];
+                try{
+                    String superId = String.valueOf(lineItem.Opportunity.Account.SuperAccount__c);
+                    String productId = String.valueOf(lineItem.Product2Id);
+                    String accountId = String.valueOf(lineItem.Opportunity.AccountId);
+                    String superProductId = superId + productId;
+                    String accountProductId = accountId + productId;
+                    Date startDate = lineItem.ServiceDate;
+                    Date closeDate = lineItem.Opportunity.Credited_Opportunity__r.CloseDate != Null ? lineItem.Opportunity.Credited_Opportunity__r.CloseDate : lineItem.Opportunity.CloseDate;
+                    List<Date> lineItemDates = new List<Date>{startDate, lineItem.ServiceEndDate__c};
+                        Date minDate = startDate < closeDate ? startDate : closeDate;
+                    lineItemDates.add(minDate);
+                    
+                    /*
+system.debug('ITERATION OF i: '+i);
+system.debug('lineItem: '+lineItem);
+system.debug('superId: '+superId);
+system.debug('productId: '+productId);
+system.debug('accountId: '+accountId);
+system.debug('superProductId: '+superProductId);
+system.debug('accountProductId: '+accountProductId);
+system.debug('startDate: '+startDate);
+system.debug('lineItem.ServiceDate: '+lineItem.ServiceDate);
+system.debug('closeDate: '+closeDate);
+system.debug('minDate: '+minDate);
+system.debug('lineItemDates: '+lineItemDates);
+*/
+                    
+                    
+                    // TODO Write a function to do this    
+                    List<List<Date>> currSuperDates = superDateMap.containsKey(superId) ? superDateMap.get(superId) : new List<List<Date>>();
+                    
+                    currSuperDates.add(lineItemDates);
+                    superDateMap.put(superId,currSuperDates);
+                    
+                    //Example: GG-ADM SD:12-12-2020 ED: 11-30-2021 CD: 3-15-2021 AccID: 001410000087fdgAAA SuperAcctID:a714N0000000JRfQAM ProdID:01t41000000gS9OAAU
+                    //superDateMap: {a714N0000000JRfQAM: [12-12-2020, 11-30-2021, 12-12-2020 ]}
+                    
+                    List<List<Date>> currSuperProductDates = superProductDateMap.containsKey(superProductId) ? superProductDateMap.get(superProductId) : new List<List<Date>>();
+                    currSuperProductDates.add(lineItemDates);
+                    superProductDateMap.put(superProductId,currSuperProductDates);
+                    //superDateMap: {a714N0000000JRfQAM01t41000000gS9OAAU: [12-12-2020, 11-30-2021, 12-12-2020 ]}
+                    
+                    List<List<Date>> currAccountDates = accountDateMap.containsKey(accountId) ? accountDateMap.get(accountId) : new List<List<Date>>();
+                    currAccountDates.add(lineItemDates);
+                    accountDateMap.put(accountId,currAccountDates);
+                    
+                    List<List<Date>> currAccountProductDates = accountProductDateMap.containsKey(accountProductId) ? accountProductDateMap.get(accountProductId) : new List<List<Date>>();
+                    currAccountProductDates.add(lineItemDates);
+                    accountProductDateMap.put(accountProductId,currAccountProductDates);
+                    
+                    
+                    
+                    
+                    /*
+system.debug('currSuperDates: '+currSuperDates);
+system.debug('superDateMap: '+ superDateMap);
+
+system.debug('currSuperProductDates: '+currSuperDates);
+system.debug('superProductDateMap: '+ superProductDateMap);
+
+system.debug('currAccountDates: '+currSuperDates);
+system.debug('accountDateMap: '+ accountDateMap);
+
+system.debug('currAccountProductDates: '+currSuperDates);
+system.debug('accountProductDateMap: '+ accountProductDateMap);
+*/
+                    
+                    if(lineItem.ServiceDate < pearDeckCutOverDate){
+                        Boolean isGG = True;
+                        if(lineItem.Product2.Family != Null){
+                            if(lineItem.Product2.Family.contains('Pear Deck')){
+                                isGG = False;
+                                List<List<Date>> pdCurrSuperDates = pdSuperDateMap.containsKey(superId) ? pdSuperDateMap.get(superId) : new List<List<Date>>();
+                                pdCurrSuperDates.add(lineItemDates);
+                                pdSuperDateMap.put(superId,pdCurrSuperDates);
+                                
+                                List<List<Date>> pdCurrSuperProductDates = pdSuperProductDateMap.containsKey(superProductId) ? pdSuperProductDateMap.get(superProductId) : new List<List<Date>>();
+                                pdCurrSuperProductDates.add(lineItemDates);
+                                pdSuperProductDateMap.put(superProductId,pdCurrSuperProductDates);
+                                
+                                List<List<Date>> pdCurrPdAccountDates = pdAccountDateMap.containsKey(accountId) ? pdAccountDateMap.get(accountId) : new List<List<Date>>();
+                                pdCurrPdAccountDates.add(lineItemDates);
+                                pdAccountDateMap.put(accountId,pdCurrPdAccountDates);
+                                
+                                List<List<Date>> pdCurrAccountProductDates = pdAccountProductDateMap.containsKey(accountProductId) ? pdAccountProductDateMap.get(accountProductId) : new List<List<Date>>();
+                                pdCurrAccountProductDates.add(lineItemDates);
+                                pdAccountProductDateMap.put(accountProductId,pdCurrAccountProductDates); 
+                                
+                                /*
+system.debug('pdCurrSuperDates: '+pdCurrSuperDates);
+system.debug('pdSuperDateMap: '+pdSuperDateMap);
+
+
+system.debug('pdCurrSuperProductDates: '+pdCurrSuperProductDates);
+system.debug('pdSuperProductDateMap: '+pdSuperProductDateMap);
+
+system.debug('pdCurrPdAccountDates: '+pdCurrPdAccountDates);
+system.debug('pdAccountDateMap: '+pdAccountDateMap);
+
+
+system.debug('pdCurrAccountProductDates: '+pdCurrAccountProductDates);
+system.debug('pdAccountProductDateMap: '+pdAccountProductDateMap);
+*/
+                            }
+                        }
+                        if(isGG){
+                            List<List<Date>> ggCurrSuperDates = ggSuperDateMap.containsKey(superId) ? ggSuperDateMap.get(superId) : new List<List<Date>>();
+                            ggCurrSuperDates.add(lineItemDates);
+                            ggSuperDateMap.put(superId,ggCurrSuperDates);
+                            
+                            List<List<Date>> ggCurrSuperProductDates = ggSuperProductDateMap.containsKey(superProductId) ? ggSuperProductDateMap.get(superProductId) : new List<List<Date>>();
+                            ggCurrSuperProductDates.add(lineItemDates);
+                            ggSuperProductDateMap.put(superProductId,ggCurrSuperProductDates);
+                            
+                            List<List<Date>> ggCurrAccountDates = ggAccountDateMap.containsKey(accountId) ? ggAccountDateMap.get(accountId) : new List<List<Date>>();
+                            ggCurrAccountDates.add(lineItemDates);
+                            ggAccountDateMap.put(accountId,ggCurrAccountDates);  
+                            
+                            List<List<Date>> ggCurrAccountProductDates = ggAccountProductDateMap.containsKey(accountProductId) ? ggAccountProductDateMap.get(accountProductId) : new List<List<Date>>();
+                            ggCurrAccountProductDates.add(lineItemDates);
+                            ggAccountProductDateMap.put(accountProductId,ggCurrAccountProductDates);
+                            
+                            /*
+
+system.debug('ggCurrSuperDates: '+ggCurrSuperDates);
+system.debug('ggSuperDateMap: '+ggSuperDateMap);
+
+system.debug('ggCurrSuperProductDates: '+ggCurrSuperProductDates);
+system.debug('ggSuperProductDateMap: '+ggSuperProductDateMap);
+
+system.debug('ggCurrAccountDates: '+ggCurrAccountDates);
+system.debug('ggAccountDateMap: '+ggAccountDateMap);
+
+system.debug('ggCurrAccountProductDates: '+ggCurrAccountProductDates);
+system.debug('ggAccountProductDateMap: '+ggAccountProductDateMap);
+*/
+                        }
+                    }
+                }
+                
+                
+                
+                
+                catch(Exception err){
+                    errorLog.add('Opportunity Line Item: '+lineItem.Id+
+                                 '\nError Message: '+err.getMessage()+
+                                 '\nStack Trace '+err.getStackTraceString());
+                }
+            }
+            
+            Map<String,Map<String, Date>> superResultMap = getRevDates(superDateMap);
+            Map<String,Map<String, Date>> superProductResultMap = getRevDates(superProductDateMap);
+            Map<String,Map<String, Date>> accountResultMap = getRevDates(accountDateMap);
+            
+            Map<String,Map<String, Date>> pdSuperResultMap = getRevDates(pdSuperDateMap);
+            Map<String,Map<String, Date>> pdSuperProductResultMap = getRevDates(pdSuperProductDateMap);
+            Map<String,Map<String, Date>> pdAccountResultMap = getRevDates(pdAccountDateMap);   
+            
+            Map<String,Map<String, Date>> ggSuperResultMap = getRevDates(ggSuperDateMap);
+            Map<String,Map<String, Date>> ggSuperProductResultMap = getRevDates(ggSuperProductDateMap);
+            Map<String,Map<String, Date>> ggAccountResultMap = getRevDates(ggAccountDateMap);
+            
+            // Maps for site-cross sell
+            Map<String,Map<String, Date>> accountProductResultMap = getRevDates(accountProductDateMap);
+            Map<String,Map<String, Date>> pdAccountProductResultMap = getRevDates(pdAccountProductDateMap);
+            Map<String,Map<String, Date>> ggAccountProductResultMap = getRevDates(ggAccountProductDateMap);
+            
+            /*
+
+system.debug('superResultMap: '+ superResultMap);
+system.debug('superProductResultMap: '+ superProductResultMap);
+system.debug('accountResultMap: '+ accountResultMap);
+system.debug('pdSuperResultMap: '+ pdSuperResultMap);
+system.debug('pdSuperProductResultMap: '+ pdSuperProductResultMap);
+system.debug('pdAccountResultMap: '+ pdAccountResultMap);
+system.debug('ggSuperResultMap: '+ ggSuperResultMap);
+system.debug('ggSuperProductResultMap: '+ ggSuperProductResultMap);
+system.debug('ggAccountResultMap: '+ ggAccountResultMap);
+system.debug('accountProductResultMap: '+ accountProductResultMap);
+system.debug('pdAccountProductResultMap: '+ pdAccountProductResultMap);
+system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
+*/
+            
+            
+            
+            
+            // If serviceDate is null use closedate
+            // If term is null, use 12 months
+            List<OpportunityLineItem> oppLineItems = [SELECT Opportunity.CloseDate, OpportunityId, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, 
+                                                      Product2Id, Product2.Up_Sell_Product__c, Product2.Family, Opportunity.OwnerId,
+                                                      ServiceDate, ServiceEndDate__c, TotalPrice, Contract__r.SBQQ__Opportunity__c
+                                                      FROM OpportunityLineItem 
+                                                      WHERE OpportunityId IN :oppMap.keySet()
+                                                      AND Product2.Do_Not_Bucket_Revenue__c = FALSE
+                                                      AND Product2.SBQQ__SubscriptionPricing__c = 'Fixed Price'
+                                                      AND Opportunity.Account.SuperAccount__c != Null
+                                                      ORDER BY ServiceDate];
+            
+            system.debug('oppLineItems: '+ oppLineItems);
+            
+            // Composite key of opportunity id, product id, and revenue type
+            Map<String,Revenue_Bucket__c> revBucketMap = new Map<String,Revenue_Bucket__c>();
+            
+            
+            
+            for(OpportunityLineItem oli : oppLineItems){
+                // If start date is >= 2021, use non-prefix.
+                // If start date is < 2021, use other.
+                // -- If product.family is Pear Deck use pdResultMap
+                // -- else use ggResultMap
+                try{
+                    
+                    system.debug('oli: '+ oli);
+                    
+                    Id comSumId = comSumMap.get(oli.OpportunityId);
+                    
+                    system.debug('comSumId: '+comSumId);
+                    Map<String,Object> bucketResult = new Map<String,Object>();
+                    
+                    if(oli.ServiceDate >= pearDeckCutOverDate){
+                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap,accountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR, accountDistrictRollupProductDateMap_ACV);
+                    }
+                    
+                    else{
+                        Boolean isGG = True;
+                        if(oli.Product2.Family != Null){
+                            if(oli.Product2.Family.contains('Pear Deck')){
+                                isGG = False;
+                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap,pdAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR, accountDistrictRollupProductDateMap_ACV);
+                            }
+                        }
+                        if(isGG){
+                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap,ggAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR,accountDistrictRollupProductDateMap_ACV);
+                        }
+                    }
+                    
+                    system.debug('bucketResult: '+ bucketResult);
+                    
+                    if(bucketResult.containsKey('RenExp')){
+                        renewalExpOppIds.add((Id)bucketResult.get('RenExp'));
+                        if(bucketResult.containsKey('RenExpLineItem')){
+                            renewalExpOppLineItems.add((Id)bucketResult.get('RenExpLineItem'));
+                            
+                            if(bucketResult.containsKey('RenExpLineItemAdjustedARR')){
+                                renewalExpOppLineItemsAdjustedARR.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedARR'));
+                               
+                            }
+                            if(bucketResult.containsKey('RenExpLineItemAdjustedACV')){
+                                renewalExpOppLineItemsAdjustedACV.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedACV'));
+                               
+                            }
+                        }
+                        
+                        revBucketMap = (Map<String,Revenue_Bucket__c>)bucketResult.get('RevBuckets');
+                    }
+                    
+                    system.debug('renewalExpOppIds: '+renewalExpOppIds);
+                    system.debug('renewalExpOppLineItems: '+renewalExpOppLineItems);
+                    system.debug('renewalExpOppLineItemsAdjustedARR: '+renewalExpOppLineItemsAdjustedARR);
+                    system.debug('renewalExpOppLineItemsAdjustedACV: '+renewalExpOppLineItemsAdjustedACV);
+                    
+                    
+                }
+                catch(Exception err){
+                    errorLog.add('Opportunity Line Item: '+oli.Id+
+                                 '\nError Message: '+err.getMessage()+
+                                 '\nStack Trace '+err.getStackTraceString());
+                }
+            }
+            
+            // Wait until the end to deprecate current revenue
+            List<Revenue_Bucket__c> oldRevBuckets = [SELECT Id 
+                                                     FROM Revenue_Bucket__c 
+                                                     WHERE (Primary__c = True OR Commissions_Exception__c = True) AND Opportunity__c IN :oppMap.keySet() 
+                                                     AND ((Type__c = 'Site Cross Sell' OR Type__c = 'New' OR Type__c = 'Cross Sell' OR Type__c = 'Site Expansion' OR Type__c = 'Up Sell') 
+                                                          OR (NOT Opportunity__c IN :renewalExpOppIds))];
+            
+
+            
+            insert revBucketMap.values();
+            
+            system.debug('revBucketMap: '+revBucketMap);
+            system.debug('revBucketMap.values(): '+revBucketMap.values());
+            
+            for(Revenue_Bucket__c revBucket : revBucketMap.values()){
+                
+                system.debug('revBucket: '+revBucket);
+                if(revBucket.From_District_Rollup__c == TRUE){
+                    
+                    districtRollUpRevBucketIds.add(revBucket.id);
+                }
+                
+            }
+            
+            system.debug('districtRollUpRevBucketIds: '+districtRollUpRevBucketIds);
+            
+            system.debug('oldRevBuckets: '+oldRevBuckets);
+            
+            if(oldRevBuckets.size() > 0){
+                
+                for(Revenue_Bucket__c oldRevBucket : oldRevBuckets){
+                    oldRevBucket.Primary__c = False;
+                    oldRevBucket.Commissions_Exception__c = False;
+                }
+                
+                update oldRevBuckets;
+            }
+            
+            System.debug('End CPU Time: '+Limits.getCpuTime());
+            System.debug('Limit CPU Time: '+Limits.getLimitCpuTime());
+        }
+        catch(Exception err){
+            errorLog.add('Error Message: '+err.getMessage()+'\nStack Trace: '+err.getStackTraceString());
+        }
+    }
+    
+    public void finish(Database.BatchableContext BC){
+        
+        if(renewalExpOppIds.size() > 0){
+            Database.executeBatch(new BatchRenExpRevCalc(renewalExpOppIds,renewalExpOppLineItems,comSumMap, renewalExpOppLineItemsAdjustedARR, renewalExpOppLineItemsAdjustedACV, districtRollUpRevBucketIds),10);
+        }
+        else{
+            String query = 'SELECT Id FROM Commission_Summary__c WHERE Opportunity__r.CloseDate = THIS_YEAR';
+            //Database.executeBatch(new BatchRevBucketSummary(query,True));
+        }
+        
+        if(errorLog.size() > 0){
+            Error_Log_Handler.errorHandler('BatchRevBucketCalc', String.join(errorLog, '\n\n'));
+        }
+    }
+    
+}
