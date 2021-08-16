@@ -60,7 +60,7 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
         
         system.debug('ENTERING getRevDates:');
         
-        system.debug('dateMap: '+dateMap);
+        //system.debug('dateMap: '+dateMap);
         
         Map<String,Map<String, Date>> resultMap = new Map<String,Map<String, Date>>();
         for(String key : dateMap.keySet()){
@@ -98,24 +98,24 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
                     });
         }
         
-        system.debug('resultMap: '+resultMap);
+        //system.debug('resultMap: '+resultMap);
         return resultMap;
     }
     
     public static Decimal getTermFromDates(Date startDate, Date endDate){
         
-        system.debug('ENTERING getTermFromDates:');
+        //system.debug('ENTERING getTermFromDates:');
         
         Integer yearEnd = endDate.year();
         Integer yearStart = startDate.year();
         
-        system.debug('yearEnd: '+ yearEnd);
+        //system.debug('yearEnd: '+ yearEnd);
         
-        system.debug('yearStart: '+ yearStart);
+        //system.debug('yearStart: '+ yearStart);
         
         Integer midTerm = yearEnd > yearStart ? yearEnd - yearStart - 1 : 0;
         
-        system.debug('midTerm: '+ midTerm);
+        //system.debug('midTerm: '+ midTerm);
         
         // Get days from start til end of year adjust for leap year
         Integer rawDaysStartYr = startDate.daysBetween(Date.newInstance(yearStart,12,31));
@@ -173,6 +173,8 @@ system.debug('term: '+ term);
                                                                                                                                       From_District_Rollup__c = isDistrictRollup,
                                                                                                                                       Commission_Summary__c=comSumId);
         
+        
+        
 
         
         system.debug('isDistrictRollup: ' + isDistrictRollup);
@@ -189,7 +191,7 @@ system.debug('term: '+ term);
         return revBucketMap;
     }
     
-    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, Map<String,Map<String,Date>> accountProductResultMap, OpportunityLineItem oli, Id comSumId, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ARR, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ACV ){
+    public static Map<String,Object> bucketRevenue(Map<String, Revenue_Bucket__c> revBucketMap, Map<String,Map<String,Date>> superResultMap, Map<String,Map<String,Date>> superProductResultMap, Map<String,Map<String,Date>> accountResultMap, Map<String,Map<String,Date>> accountProductResultMap, OpportunityLineItem oli, Id comSumId, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ARR, Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ACV, Map<String, Decimal> disrictRollUpAggregate_ARR, Map<String, Decimal> disrictRollUpAggregate_ACV ){
         
         system.debug('ENTERING bucketRevenue: '); 
         
@@ -205,6 +207,7 @@ system.debug('term: '+ term);
         Date startDate = oli.ServiceDate;
         Date endDate = oli.ServiceEndDate__c;
         Date closeDate = oli.Opportunity.CloseDate;
+        
         
         String districtRollupKey = oppId + productId;
         
@@ -247,7 +250,7 @@ system.debug('term: '+ term);
         
         system.debug('arr before district roll up: '+ arr);
         
-        system.debug('accountDistrictRollupProductDateMap_ARR: '+ accountDistrictRollupProductDateMap_ARR);
+        //system.debug('accountDistrictRollupProductDateMap_ARR: '+ accountDistrictRollupProductDateMap_ARR);
         
         system.debug('districtRollupKey: '+ districtRollupKey);
         
@@ -255,54 +258,78 @@ system.debug('term: '+ term);
         
         Boolean isDistrictRollup;
         
+        system.debug('disrictRollUpAggregate_ARR: '+ disrictRollUpAggregate_ARR);
+        system.debug('disrictRollUpAggregate_ACV: '+ disrictRollUpAggregate_ACV);
         
-        if(accountDistrictRollupProductDateMap_ARR.containsKey(districtRollupKey)){
+        if(disrictRollUpAggregate_ARR.containsKey(districtRollupKey) || disrictRollUpAggregate_ACV.containsKey(districtRollupKey)){
             
-           
-            Map<String, Decimal> distrRollUpMap = accountDistrictRollupProductDateMap_ARR.get(districtRollupKey);
-            Map<String, Decimal> distrRollUpMap_ACV = accountDistrictRollupProductDateMap_ACV.get(districtRollupKey);
             
-            system.debug('distrRollUpMap: '+ distrRollUpMap);
-            system.debug('distrRollUpMap_ACV: '+ distrRollUpMap_ACV);
+            //Map<String, Decimal> distrRollUpMap = accountDistrictRollupProductDateMap_ARR.get(districtRollupKey);
+            //Map<String, Decimal> distrRollUpMap_ACV = accountDistrictRollupProductDateMap_ACV.get(districtRollupKey);
+            
+            //aggregate values
+            Decimal aggregateARR = disrictRollUpAggregate_ARR.get(districtRollupKey);
+            Decimal aggregateACV = disrictRollUpAggregate_ACV.get(districtRollupKey);
+            
+            system.debug('aggregateARR: '+ aggregateARR);
+            system.debug('aggregateACV: '+ aggregateACV);
+            
             
             Integer counter = 0;
             
             
+            String staticRevType = 'On Time Renewal';
             
-            for (String revTypeKey : distrRollUpMap.keySet()){
-                
-                system.debug('revType: '+ revTypeKey);
-                system.debug('counter: '+ counter);
-                
-                
-                Decimal districtRollupARR = distrRollUpMap.get(revTypeKey);
-                Decimal districtRollupACV = distrRollUpMap_ACV.get(revTypeKey);
-                
-                system.debug('districtRollupARR: '+ districtRollupARR);
-                system.debug('districtRollupACV: '+ districtRollupACV);
-                
-                
-                arr = arr - districtRollupARR; 
-                
-                acv = acv - districtRollupACV;
-                
-                system.debug('arr: '+ arr);
-                system.debug('acv: '+ acv);
-                
-                isDistrictRollup = TRUE;
-                
-                //build additional map with acv -- mirror arr map -- creating revenue bucket
-                revBucketMap = updateRevBucketMap(revBucketMap,oli,revTypeKey,districtRollupARR,districtRollupACV,comSumId,districtRollupKey, isDistrictRollup);
-                
-                
-                //update adjusted arr field which will be passed to batchrenexprevcalc class
-                oli.Adjusted_ARR__c = arr;
-                oli.Adjusted_ACV_for_district_rollup__c = acv;
-                
-                counter = counter + 1;
-                
-                
+            
+            
+            system.debug('counter: '+ counter);
+            
+            
+            //Decimal districtRollupARR = distrRollUpMap.get(compositeKey);
+            //Decimal districtRollupACV = distrRollUpMap_ACV.get(compositeKey);
+            
+            //system.debug('districtRollupARR: '+ districtRollupARR);
+            //system.debug('districtRollupACV: '+ districtRollupACV);
+            
+            if(arr > aggregateARR){
+            arr = arr - aggregateARR; 
             }
+            else{
+                arr = aggregateARR - arr;
+            }
+            
+            if(acv > aggregateACV){
+            acv = acv - aggregateACV; 
+            }
+            else{
+                acv = aggregateACV - acv;
+            }
+            
+            system.debug('arr: '+ arr);
+            system.debug('acv: '+ acv);
+            
+            isDistrictRollup = TRUE;
+            
+            //build additional map with acv -- mirror arr map -- creating revenue bucket
+            revBucketMap = updateRevBucketMap(revBucketMap,oli,staticRevType,aggregateARR,aggregateACV,comSumId,districtRollupKey, isDistrictRollup);
+            
+            
+            
+            //update adjusted arr field which will be passed to batchrenexprevcalc class
+            oli.Adjusted_ARR__c = arr;
+            oli.Adjusted_ACV_for_district_rollup__c = acv;
+            
+            
+            system.debug('oli.Adjusted_ARR__c: '+ oli.Adjusted_ARR__c);
+            system.debug('oli.Adjusted_ACV_for_district_rollup__c: '+ oli.Adjusted_ACV_for_district_rollup__c);
+            
+            counter = counter + 1;
+            
+            
+            
+            
+            
+            
             
             system.debug('counter: '+ counter);
             
@@ -332,7 +359,7 @@ system.debug('term: '+ term);
         
         
         
-        //oli.Adjusted_ARR__c = arr;
+        system.debug('oli.Adjusted_ARR__c: '+oli.Adjusted_ARR__c);
         
         system.debug('arr after district roll up if statement: '+arr);
         system.debug('acv after district roll up if statement: '+acv);
@@ -465,6 +492,7 @@ system.debug('term: '+ term);
                                        AND SBQQ__Opportunity__r.Returned_Or_CM__c = FALSE];
             
             system.debug('contList'+ contList);
+            system.debug('contList.size()'+ contList.size());
             
             //contList:
             // cont 1: GG-ADM ($500) // GG-TCR ($500)
@@ -472,17 +500,18 @@ system.debug('term: '+ term);
             
             
             List<AggregateResult> aggregateDistrictRenewalProducts = [SELECT Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, Renewal_Start_Date__c, SUM(ARR__c) ARR, SUM(ACV__c) ACV 
-                                                                 FROM OpportunityLineItem
-                                                                 WHERE Contract__c in :contList 
-                                                                 AND Opportunity.StageName = 'Purchase'
-                                                                 AND ServiceDate != NULL 
-                                                                 AND ServiceEndDate__c != Null
-                                                                 AND Opportunity.Returned_Or_CM__c = False
-                                                                 GROUP BY Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, Renewal_Start_Date__c];
+                                                                      FROM OpportunityLineItem
+                                                                      WHERE Contract__c in :contList 
+                                                                      AND Opportunity.StageName = 'Purchase'
+                                                                      AND ServiceDate != NULL 
+                                                                      AND ServiceEndDate__c != Null
+                                                                      AND Opportunity.Returned_Or_CM__c = False
+                                                                      GROUP BY Contract__r.SBQQ__RenewalOpportunity__c, Contract__r.SBQQ__RenewalOpportunity__r.CloseDate, Product2Id, Renewal_Start_Date__c];
             
             
             
             system.debug('aggregateDistrictRenewalProducts'+ aggregateDistrictRenewalProducts);
+            
             
             
             
@@ -584,6 +613,17 @@ system.debug('term: '+ term);
             Map<String,Map<String, Decimal>> accountDistrictRollupProductDateMap_ACV = new Map<String,Map<String, Decimal>>();
             
             
+            //Decimal allARR = 0;
+            //Decimal earlyRenewal_ARR = 0;
+            //Decimal onTimeRenewal_ARR = 0;
+            //Decimal lateRenewal_ARR = 0;
+            
+            
+            Map<String,Decimal> disrictRollUpAggregate_ARR = new Map<String,Decimal>();
+            Map<String,Decimal> disrictRollUpAggregate_ACV = new Map<String,Decimal>();
+            
+            
+            
             for(AggregateResult ar : aggregateDistrictRenewalProducts){
                 
                 system.debug('ar: '+ar);
@@ -608,6 +648,10 @@ system.debug('term: '+ term);
                 Integer renewalStartDateMonth = renewalStartDate.month();                
                 Integer renewalStartDateYear = renewalStartDate.year();
                 
+                Decimal arr = (decimal)ar.get('ARR') != NULL ? (decimal)ar.get('ARR') : 0;
+                Decimal acv = (decimal)ar.get('ACV') != NULL ? (decimal)ar.get('ACV') : 0;
+                system.debug('arr: '+arr);
+                system.debug('acv: '+acv);
                 system.debug('renewalStartDate: '+renewalStartDate);
                 system.debug('closeDateMonth: '+closeDateMonth);
                 system.debug('closeDateYear: '+closeDateYear);
@@ -619,6 +663,7 @@ system.debug('term: '+ term);
                 If( Date.newInstance(closeDate.year(), closeDate.month(), 1) < Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
                     
                     renewalType = 'Early Renewal';
+                    //earlyRenewal_ARR = earlyRenewal_ARR + arr;
                     
                 }
                 
@@ -626,17 +671,33 @@ system.debug('term: '+ term);
                 else if ( Date.newInstance(closeDate.year(), closeDate.month(), 1) == Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
                     
                     renewalType = 'On Time Renewal';
+                    //onTimeRenewal_ARR = onTimeRenewal_ARR + arr;
                 }
                 
                 else if(Date.newInstance(closeDate.year(), closeDate.month(), 1) > Date.newInstance(renewalStartDate.year(), renewalStartDate.month(), 1)){
                     
                     
-                    
                     renewalType = 'Late Renewal';
+                    //lateRenewal_ARR = lateRenewal_ARR + arr;
                     
                 }
                 
                 
+                system.debug('renewalType: '+renewalType);
+                
+                Decimal standingARR = disrictRollUpAggregate_ARR.containsKey(compositeKey) ? disrictRollUpAggregate_ARR.get(compositeKey) + arr : arr + 0;
+                
+                Decimal standingACV = disrictRollUpAggregate_ACV.containsKey(compositeKey) ? disrictRollUpAggregate_ACV.get(compositeKey) + acv : acv + 0;
+                
+                
+                disrictRollUpAggregate_ARR.put(compositeKey, standingARR);
+                disrictRollUpAggregate_ACV.put(compositeKey, standingACV);
+                
+                
+                
+                system.debug('standingARR: '+standingARR);
+                system.debug('disrictRollUpAggregate_ARR in LOOP: '+disrictRollUpAggregate_ARR);
+                system.debug('disrictRollUpAggregate_ACV in LOOP: '+disrictRollUpAggregate_ACV);
                 
                 renewalTypeMap_ARR.put(renewalType,(decimal)ar.get('ARR'));
                 
@@ -648,9 +709,24 @@ system.debug('term: '+ term);
                 accountDistrictRollupProductDateMap_ARR.put(compositeKey,renewalTypeMap_ARR);
                 accountDistrictRollupProductDateMap_ACV.put(compositeKey,renewalTypeMap_ACV);
                 
+                system.debug('IN LOOP: accountDistrictRollupProductDateMap_ARR: '+accountDistrictRollupProductDateMap_ARR);
+                system.debug('IN LOOP: accountDistrictRollupProductDateMap_ACV: '+accountDistrictRollupProductDateMap_ACV);
+                
                 //oppProdid: 23432432342 { 'early' : 3242.33}
                 
             }
+            
+            
+            //system.debug('earlyRenewal_ARR: '+earlyRenewal_ARR);
+            //system.debug('onTimeRenewal_ARR: '+onTimeRenewal_ARR);
+            //system.debug('lateRenewal_ARR: '+lateRenewal_ARR);
+            //allARR = earlyRenewal_ARR + onTimeRenewal_ARR + lateRenewal_ARR;
+            //system.debug('allARR: '+allARR);
+            
+            system.debug('disrictRollUpAggregate_ARR: '+disrictRollUpAggregate_ARR);
+            system.debug('disrictRollUpAggregate_ACV: '+disrictRollUpAggregate_ACV);
+            
+            
             
             system.debug('accountDistrictRollupProductDateMap_ARR: '+accountDistrictRollupProductDateMap_ARR);
             system.debug('accountDistrictRollupProductDateMap_ACV: '+accountDistrictRollupProductDateMap_ACV);
@@ -880,7 +956,7 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
                     Map<String,Object> bucketResult = new Map<String,Object>();
                     
                     if(oli.ServiceDate >= pearDeckCutOverDate){
-                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap,accountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR, accountDistrictRollupProductDateMap_ACV);
+                        bucketResult = bucketRevenue(revBucketMap,superResultMap,superProductResultMap,accountResultMap,accountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR, accountDistrictRollupProductDateMap_ACV, disrictRollUpAggregate_ARR, disrictRollUpAggregate_ACV);
                     }
                     
                     else{
@@ -888,11 +964,11 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
                         if(oli.Product2.Family != Null){
                             if(oli.Product2.Family.contains('Pear Deck')){
                                 isGG = False;
-                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap,pdAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR, accountDistrictRollupProductDateMap_ACV);
+                                bucketResult = bucketRevenue(revBucketMap,pdSuperResultMap,pdSuperProductResultMap,pdAccountResultMap,pdAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR, accountDistrictRollupProductDateMap_ACV, disrictRollUpAggregate_ARR, disrictRollUpAggregate_ACV);
                             }
                         }
                         if(isGG){
-                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap,ggAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR,accountDistrictRollupProductDateMap_ACV);
+                            bucketResult = bucketRevenue(revBucketMap,ggSuperResultMap,ggSuperProductResultMap,ggAccountResultMap,ggAccountProductResultMap, oli,comSumId, accountDistrictRollupProductDateMap_ARR,accountDistrictRollupProductDateMap_ACV, disrictRollUpAggregate_ARR, disrictRollUpAggregate_ACV);
                         }
                     }
                     
@@ -905,11 +981,11 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
                             
                             if(bucketResult.containsKey('RenExpLineItemAdjustedARR')){
                                 renewalExpOppLineItemsAdjustedARR.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedARR'));
-                               
+                                
                             }
                             if(bucketResult.containsKey('RenExpLineItemAdjustedACV')){
                                 renewalExpOppLineItemsAdjustedACV.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedACV'));
-                               
+                                
                             }
                         }
                         
@@ -937,13 +1013,17 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
                                                      AND ((Type__c = 'Site Cross Sell' OR Type__c = 'New' OR Type__c = 'Cross Sell' OR Type__c = 'Site Expansion' OR Type__c = 'Up Sell') 
                                                           OR (NOT Opportunity__c IN :renewalExpOppIds))];
             
-
             
-            insert revBucketMap.values();
+            
+            system.debug('oldRevBuckets: '+oldRevBuckets);
             
             system.debug('revBucketMap: '+revBucketMap);
             system.debug('revBucketMap.values(): '+revBucketMap.values());
             
+            insert revBucketMap.values();
+            
+
+           
             for(Revenue_Bucket__c revBucket : revBucketMap.values()){
                 
                 system.debug('revBucket: '+revBucket);
@@ -953,10 +1033,10 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
                 }
                 
             }
+
             
             system.debug('districtRollUpRevBucketIds: '+districtRollUpRevBucketIds);
-            
-            system.debug('oldRevBuckets: '+oldRevBuckets);
+
             
             if(oldRevBuckets.size() > 0){
                 
