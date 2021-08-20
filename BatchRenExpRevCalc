@@ -210,9 +210,9 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
                 Integer closeDateKey = closeDateYear * 12 + closeDateMonth;
                 String acctProdMonthKey = accountProdKey + String.valueOf(currMonthKey);
                 
-                System.debug('currMonthKey: '+oppProducts);
-                System.debug('closeDateKey: '+oppProducts);
-                System.debug('acctProdMonthKey: '+oppProducts);
+                System.debug('currMonthKey: '+currMonthKey);
+                System.debug('closeDateKey: '+closeDateKey);
+                System.debug('acctProdMonthKey: '+acctProdMonthKey);
                 
                 Boolean hasExpiredProd = expiredAccountProd.containsKey(accountProdKey);
                 Boolean hasNewProd = newAccountProd.containsKey(accountProdKey);
@@ -528,6 +528,6 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
             Error_Log_Handler.errorHandler('BatchRenExpRevCalc', String.join(errorLog, '\n\n'));
         }
         String query = 'SELECT Id FROM Commission_Summary__c WHERE Opportunity__r.CloseDate = THIS_YEAR';
-        //Database.executeBatch(new BatchRevBucketSummary(query,True));
+        Database.executeBatch(new BatchRevBucketSummary(query,True));
     }
 }
