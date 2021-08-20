@@ -1,0 +1,804 @@
+@isTest
+public class Test_BatchRevBucketCalc {
+    
+    @testSetup
+    public static void setupTest(){
+        //Get the standard pricebook
+        ID stdPricebook = Test.getStandardPricebookId();
+        
+        // Create a product with a product code
+        Product2 prod = new Product2();
+        prod.Name='test prod'; 
+        prod.ProductCode ='GG-ADM'; 
+        prod.Core_Product__c = TRUE;
+        prod.SBQQ__SubscriptionPricing__c = 'Fixed Price';
+        
+        
+        INSERT prod;
+        
+        Product2 prod2 = new Product2();
+        prod2.Name='test prod2'; 
+        prod2.ProductCode ='GG-TCR';
+        prod2.Family = 'Pear Deck - Subscription';
+        prod.SBQQ__SubscriptionPricing__c = 'Fixed Price';
+        
+        
+        INSERT prod2;
+        
+        
+        // Create Pricebook Entry on Standard Pricebook first
+        PricebookEntry standardPrice = new PricebookEntry();
+        standardPrice.Pricebook2Id = stdPricebook;
+        standardPrice.Product2Id = prod.id;
+        standardPrice.UnitPrice = 10000;
+        standardPrice.IsActive = true;
+        standardPrice.UseStandardPrice = FALSE;
+        
+        INSERT standardPrice;
+        
+        
+        DATE todayDate = system.today();
+        DATE yearOut = todayDate+365;
+        
+        SuperAccount__c superAccount = new SuperAccount__c(Name = 'Test Super',
+                                                           Active_Date__c = System.today()-365);
+        
+        insert superAccount;
+        
+        
+        List<Account> accountList = new List<Account>();
+        
+        Account testAccount = new Account();
+        testAccount.Name='Test account';
+        testAccount.SuperAccount__c = superAccount.Id;
+        testAccount.Org_ID__c = 'someID';
+        testAccount.Test_Account__c = TRUE;
+        testAccount.Active_Date__c = System.today() - 365;
+        testAccount.First_Booking_Date__c = System.today() - 365;
+        testAccount.ADM_First_Booking_Date__c = System.today() - 365;
+        testAccount.Procurement_Turnaround_Time_days__c = 0;
+        
+        accountList.add(testAccount);
+        
+        
+        //districtRollUpAccount
+        Account childAccount = new Account();
+        childAccount.Name='Child account';
+        childAccount.SuperAccount__c = superAccount.Id;
+        childAccount.Org_ID__c = 'someID12';
+        childAccount.Test_Account__c = TRUE;
+        childAccount.Active_Date__c = System.today() - 365;
+        childAccount.First_Booking_Date__c = System.today() - 365;
+        childAccount.ADM_First_Booking_Date__c = System.today() - 365;
+        childAccount.Procurement_Turnaround_Time_days__c = 0;
+        
+        accountList.add(childAccount); 
+        
+        insert accountList;
+        
+        
+        List<Opportunity> opps = new List<Opportunity>();
+        
+        Opportunity oppty1 = new Opportunity();
+        oppty1.Name = 'Test oppty1';
+        oppty1.Type = 'New';
+        oppty1.Po_Number__c = 'Test oppty1';
+        oppty1.Amount = 100;
+        oppty1.AccountId = testAccount.Id;
+        oppty1.StageName = 'Closing';
+        oppty1.CloseDate = System.today()-15;
+        oppty1.Channel__c = 'Direct';
+        
+        opps.add(oppty1);
+        
+        Opportunity oppty2 = new Opportunity();
+        oppty2.Name = 'Test oppty2';
+        oppty2.PO_number__c = 'Test oppty2';
+        oppty2.Type = 'New';
+        oppty2.Amount = 200;
+        oppty2.AccountId = testAccount.Id;
+        oppty2.StageName = 'Closing';
+        oppty2.CloseDate = System.today() - 365;
+        oppty2.Channel__c = 'Direct';
+        
+        opps.add(oppty2);
+        
+        //opp to use that will be purchase before original opp - testing BatchRenExpRevCalc
+        Opportunity oppty3 = new Opportunity();
+        oppty3.Name = 'opp that will be renewed';
+        oppty3.PO_number__c = 'opp that will be renewed';
+        oppty3.Type = 'New';
+        oppty3.Amount = 200;
+        oppty3.AccountId = testAccount.Id;
+        oppty3.StageName = 'Closing';
+        oppty3.CloseDate =  System.today() - 366;
+        oppty3.Channel__c = 'Direct';
+        
+        opps.add(oppty3);
+        
+        INSERT opps;
+        
+        SBQQ.TriggerControl.disable();
+        
+        List<SBQQ__Quote__c> quotes = new List<SBQQ__Quote__c>();
+        List<SBQQ__QuoteLine__c> quoteLines = new List<SBQQ__QuoteLine__c>();
+        
+        SBQQ__Quote__c testQuote1 = new SBQQ__Quote__c();
+        testQuote1.Quote_Name__c = 'testQuote1';
+        testQuote1.SBQQ__Opportunity2__c = oppty1.Id;
+        testQuote1.SBQQ__Account__c = testAccount.Id;
+        testQuote1.Price_List__c = 'Direct';
+        
+        quotes.add(testQuote1);
+        
+        
+        SBQQ__Quote__c testQuote2 = new SBQQ__Quote__c();
+        testQuote2.Quote_Name__c = 'testQuote2';
+        testQuote2.SBQQ__Opportunity2__c = oppty2.Id;
+        testQuote2.SBQQ__Account__c = testAccount.Id;
+        testQuote2.Price_List__c = 'Direct';
+        
+        quotes.add(testQuote2);
+        
+        
+        
+        insert quotes;
+        
+        SBQQ__QuoteLine__c qLine4 = new SBQQ__QuoteLine__c();
+        qLine4.SBQQ__Quote__c = testQuote1.Id;
+        qLine4.SBQQ__Quantity__c = 40;
+        qLine4.SBQQ__Product__c = prod2.Id;
+        qLine4.Deal_Type__c = 'New';
+        qLine4.SBQQ__StartDate__c = System.today();
+        qLine4.SBQQ__EndDate__c = System.today() + 365;
+        qLine4.Invoice_Part_Number__c = 'GG-TEST';
+        qLine4.Invoice_Quantity__c = '40';
+        
+        quoteLines.add(qLine4);
+        
+        SBQQ__QuoteLine__c qLine1 = new SBQQ__QuoteLine__c();
+        qLine1.SBQQ__Quote__c = testQuote1.Id;
+        qLine1.SBQQ__Quantity__c = 40;
+        qLine1.SBQQ__Product__c = prod.Id;
+        qLine1.Deal_Type__c = 'New';
+        qLine1.SBQQ__StartDate__c = System.today();
+        qLine1.SBQQ__EndDate__c = System.today() + 365;
+        qLine1.Invoice_Part_Number__c = 'GG-TEST';
+        qLine1.Invoice_Quantity__c = '40';
+        
+        quoteLines.add(qLine1);
+        
+        SBQQ__QuoteLine__c qLine2 = new SBQQ__QuoteLine__c();
+        qLine2.SBQQ__Quote__c = testQuote2.Id;
+        qLine2.SBQQ__Quantity__c = 40;
+        qLine2.SBQQ__Product__c = prod.Id;
+        qLine2.Deal_Type__c = 'New';
+        qLine2.SBQQ__StartDate__c = System.today() - 365;
+        qLine2.SBQQ__EndDate__c = System.today();
+        qLine2.Invoice_Part_Number__c = 'GG-TEST';
+        qLine2.Invoice_Quantity__c = '40';
+        
+        quoteLines.add(qLine2);
+        
+        SBQQ__QuoteLine__c qLine3 = new SBQQ__QuoteLine__c();
+        qLine3.SBQQ__Quote__c = testQuote2.Id;
+        qLine3.SBQQ__Quantity__c = 40;
+        qLine3.SBQQ__Product__c = prod.Id;
+        qLine3.Deal_Type__c = 'New';
+        qLine3.SBQQ__StartDate__c = System.today() - 405;
+        qLine3.SBQQ__EndDate__c = System.today() - 40;
+        qLine3.Invoice_Part_Number__c = 'GG-TEST';
+        qLine3.Invoice_Quantity__c = '40';
+        
+        quoteLines.add(qLine3);
+        
+        insert quoteLines;
+        
+        
+        
+        
+        
+        //Grab Pricebook2ID from Oppty
+        //Becuase automation changes Pricebook from default
+        LIST<Opportunity> testOppty2 = [SELECT id, Pricebook2Id FROM opportunity
+                                        WHERE id = :oppty2.id];
+        ID myPricebook = testOppty2[0].Pricebook2Id;
+        
+        // Create Pricebook Entry in Opp's pricebook
+        PricebookEntry customPrice = new PricebookEntry();
+        customPrice.Pricebook2Id = myPricebook;
+        customPrice.Product2Id = prod.Id;
+        customPrice.UnitPrice = 10000;
+        customPrice.IsActive = true;
+        customPrice.UseStandardPrice = FALSE;
+        
+        INSERT customPrice;
+        
+        SBQQ.TriggerControl.enable();
+        
+    }
+    
+    
+    public static testMethod void testRevCalc1(){
+        
+        ID stdPricebook = Test.getStandardPricebookId();
+        
+        PricebookEntry customPrice = [SELECT Id FROM PricebookEntry WHERE Pricebook2Id != :stdPricebook LIMIT 1];
+        
+        List<SBQQ__QuoteLine__c> quoteLines = [SELECT Id, SBQQ__Quote__r.SBQQ__Opportunity2__c, SBQQ__Quantity__c, 
+                                               SBQQ__Product__c, SBQQ__StartDate__c, SBQQ__EndDate__c
+                                               FROM SBQQ__QuoteLine__c];
+        
+        List<OpportunityLineItem> oppLines = new List<OpportunityLineItem>();
+        
+        for(SBQQ__QuoteLine__c qLine : quoteLines){
+            OpportunityLineItem oppProd = new OpportunityLineItem();
+            
+            if(qLine.SBQQ__EndDate__c == System.today()){
+                oppProd.TotalPrice = 900;
+            }
+            else if(qLine.SBQQ__EndDate__c == System.today() - 40){
+                oppProd.TotalPrice = 100;
+            }
+            else{
+                oppProd.TotalPrice = 1500;
+            }
+            
+            oppProd.OpportunityID = qLine.SBQQ__Quote__r.SBQQ__Opportunity2__c; 
+            oppProd.PricebookEntryID = customPrice.id;
+            oppProd.Product2Id = qLine.SBQQ__Product__c;
+            oppProd.SBQQ__QuoteLine__c = qLine.Id;
+            oppProd.Active_Checkbox__c = TRUE;
+            oppProd.ServiceEndDate__c = qLine.SBQQ__EndDate__c;
+            oppProd.ServiceDate = qLine.SBQQ__StartDate__c;
+            oppProd.Quantity = qLine.SBQQ__Quantity__c;
+            
+            oppLines.add(oppProd);       
+        }
+        
+        insert oppLines;
+        
+        Opportunity opp2 = [SELECT Id FROM Opportunity WHERE Po_Number__c = 'Test oppty2' LIMIT 1]; 
+        
+        opp2.StageName = 'Purchase';
+        
+        Opportunity opp1 = [SELECT Id FROM Opportunity WHERE Po_Number__c = 'Test oppty1' LIMIT 1];
+        
+        opp1.CloseDate = System.today() - 40;
+        
+        update new List<Opportunity>{opp1, opp2};
+            
+            Set<Id> oppIds = (new Map<Id,Opportunity>([SELECT Id FROM Opportunity LIMIT 1])).keySet();
+        
+        Test.startTest();
+        Invocable_BatchRevBucketCalc.bucketRevenue(new List<Id>(oppIds));
+        Test.stopTest();
+    }
+    
+    public static testMethod void testRevCalc2(){
+        
+        
+        
+        ID stdPricebook = Test.getStandardPricebookId();
+        
+        PricebookEntry customPrice = [SELECT Id FROM PricebookEntry WHERE Pricebook2Id != :stdPricebook LIMIT 1];
+        
+        List<SBQQ__QuoteLine__c> quoteLines = [SELECT Id, SBQQ__Quote__r.SBQQ__Opportunity2__c, SBQQ__Quantity__c, 
+                                               SBQQ__Product__c, SBQQ__StartDate__c, SBQQ__EndDate__c
+                                               FROM SBQQ__QuoteLine__c];
+        
+        List<OpportunityLineItem> oppLines = new List<OpportunityLineItem>();
+        
+        for(SBQQ__QuoteLine__c qLine : quoteLines){
+            OpportunityLineItem oppProd = new OpportunityLineItem();
+            
+            if(qLine.SBQQ__EndDate__c == System.today()){
+                oppProd.TotalPrice = 900;
+            }
+            else if(qLine.SBQQ__EndDate__c == System.today() - 40){
+                oppProd.TotalPrice = 100;
+            }
+            else{
+                oppProd.TotalPrice = 1500;
+            }
+            
+            oppProd.OpportunityID = qLine.SBQQ__Quote__r.SBQQ__Opportunity2__c; 
+            oppProd.PricebookEntryID = customPrice.id;
+            oppProd.Product2Id = qLine.SBQQ__Product__c;
+            oppProd.SBQQ__QuoteLine__c = qLine.Id;
+            oppProd.Active_Checkbox__c = TRUE;
+            oppProd.ServiceEndDate__c = qLine.SBQQ__EndDate__c;
+            oppProd.ServiceDate = qLine.SBQQ__StartDate__c;
+            oppProd.Quantity = qLine.SBQQ__Quantity__c;
+            
+            oppLines.add(oppProd);       
+        }
+        
+        insert oppLines;
+        
+        Opportunity opp2 = [SELECT Id FROM Opportunity WHERE Po_Number__c = 'Test oppty2' LIMIT 1]; 
+        
+        
+        opp2.StageName = 'Purchase';
+        
+        Opportunity opp1 = [SELECT Id FROM Opportunity WHERE Po_Number__c = 'Test oppty1' LIMIT 1];
+        
+        opp1.CloseDate = System.today() - 40;
+        
+        update new List<Opportunity>{opp1, opp2};
+            
+            Set<Id> oppIds = (new Map<Id,Opportunity>([SELECT Id FROM Opportunity])).keySet();
+        
+        Test.startTest();
+        Database.executeBatch(new BatchRevBucketCalc(oppIds));
+        Test.stopTest();
+    }
+    
+    public static testMethod void testDistrictRollup(){
+        
+        //SuperAccount__c superAccount = [select id FROM SuperAccount__c WHERE Name = 'Test Super' LIMIT 1];
+        
+        Account childAccount = [SELECT ID FROM Account WHERE Name = 'Child account' LIMIT 1];
+        
+        ID districtRollupOppID;
+        ID districtRollupOppAccountID;
+        ID childOppID;
+        ID childOppAccountID;
+        
+        List<Opportunity> oppsToUpdate = new List<Opportunity>();
+
+        List<Opportunity> oppList = [SELECT Id, AccountId, Po_Number__c FROM Opportunity];
+
+        
+        For(Opportunity opp : oppList){
+
+            if(opp.Po_Number__c == 'Test oppty1'){
+                
+                districtRollupOppID = opp.id;
+                districtRollupOppAccountID = opp.AccountId;
+            }
+            
+            if(opp.Po_Number__c == 'Test oppty2'){
+                
+                childOppID = opp.id;
+                childOppAccountID = opp.AccountId;
+                opp.AccountId = childAccount.id;
+                opp.StageName = 'Purchase';
+                
+                oppsToUpdate.add(opp);
+            }
+            
+        }
+        
+        ID stdPricebook = Test.getStandardPricebookId();
+        
+        PricebookEntry customPrice = [SELECT Id FROM PricebookEntry WHERE Pricebook2Id != :stdPricebook LIMIT 1];
+        
+        List<SBQQ__QuoteLine__c> quoteLines = [SELECT Id, SBQQ__Quote__r.SBQQ__Opportunity2__c, SBQQ__Quantity__c, 
+                                               SBQQ__Product__c, SBQQ__StartDate__c, SBQQ__EndDate__c
+                                               FROM SBQQ__QuoteLine__c];
+        
+        List<OpportunityLineItem> oppLines = new List<OpportunityLineItem>();
+        
+        for(SBQQ__QuoteLine__c qLine : quoteLines){
+            
+            OpportunityLineItem oppProd = new OpportunityLineItem();
+            
+            oppProd.TotalPrice = 1500;
+            oppProd.OpportunityID = qLine.SBQQ__Quote__r.SBQQ__Opportunity2__c; 
+            oppProd.PricebookEntryID = customPrice.id;
+            oppProd.Product2Id = qLine.SBQQ__Product__c;
+            oppProd.SBQQ__QuoteLine__c = qLine.Id;
+            oppProd.Active_Checkbox__c = TRUE;
+            oppProd.ServiceEndDate__c = qLine.SBQQ__EndDate__c;
+            oppProd.ServiceDate = qLine.SBQQ__StartDate__c;
+            oppProd.Quantity = qLine.SBQQ__Quantity__c;
+            
+            oppLines.add(oppProd);       
+        }
+        
+        insert oppLines;
+        
+        
+        List<Contract> contList = new List<Contract>();
+        
+        
+        Contract districtRollupContract = new Contract(SBQQ__Opportunity__c = districtRollupOppID,
+                                                       AccountId = districtRollupOppAccountID,
+                                                       ContractTerm = 12,
+                                                       Site_License_Contract__c = TRUE,
+                                                       Status = 'Draft',
+                                                       StartDate = System.today(),
+                                                       EndDate = System.today() + 365);
+        
+        insert districtRollupContract;
+        
+        
+        Contract childContract = new Contract(SBQQ__Opportunity__c = childOppID,
+                                              SBQQ__RenewalOpportunity__c = districtRollupOppID,
+                                              Site_License_Contract_Lookup__c = districtRollupContract.id,
+                                              AccountId = childOppAccountID,
+                                              ContractTerm = 12,
+                                              Status = 'Draft',
+                                              StartDate  =System.today() - 365,
+                                              EndDate = System.today());
+        
+        
+        insert childContract;
+        
+        
+        
+        childContract.Status = 'Activated';
+        
+        update childContract;
+        
+        update oppsToUpdate;
+
+
+        
+        Set<Id> oppIds = new Set<Id>();
+        
+        oppIds.add(districtRollupOppID);
+        
+        Test.startTest();
+        Database.executeBatch(new BatchRevBucketCalc(oppIds));
+        Test.stopTest();
+        
+        
+        
+    } 
+    
+    public static testMethod void testBatchRevBucketCalc(){
+        
+        //SuperAccount__c superAccount = [select id FROM SuperAccount__c WHERE Name = 'Test Super' LIMIT 1];
+        
+        Account childAccount = [SELECT ID FROM Account WHERE Name = 'Child account' LIMIT 1];
+        
+        ID districtRollupOppID;
+        ID districtRollupOppAccountID;
+        ID childOppID;
+        ID childOppAccountID;
+        ID oldRenewalOppID;
+        ID oldRenewalOppAccountID;
+
+        List<Opportunity> oppsToUpdate = new List<Opportunity>();
+        
+        List<Opportunity> oppList = [SELECT Id, AccountId, Po_Number__c FROM Opportunity];
+        
+        //system.debug('oppList: '+ oppList);
+        
+        For(Opportunity opp : oppList){
+            
+            //system.debug('opp: '+ opp);
+            
+            if(opp.Po_Number__c == 'Test oppty1'){
+                
+                districtRollupOppID = opp.id;
+                districtRollupOppAccountID = opp.AccountId;
+ 
+            }
+            
+            if(opp.Po_Number__c == 'Test oppty2'){
+                
+                childOppID = opp.id;
+                childOppAccountID = opp.AccountId;
+                opp.AccountId = childAccount.id;
+                opp.StageName = 'Purchase';
+                
+                oppsToUpdate.add(opp);
+
+            }
+            
+            if(opp.Po_Number__c == 'opp that will be renewed'){
+                
+                oldRenewalOppID = opp.id;
+                oldRenewalOppAccountID = opp.AccountId;
+                opp.StageName = 'Purchase';
+
+                oppsToUpdate.add(opp);
+                
+            }
+
+        }
+        
+        ID stdPricebook = Test.getStandardPricebookId();
+        
+        PricebookEntry customPrice = [SELECT Id FROM PricebookEntry WHERE Pricebook2Id != :stdPricebook LIMIT 1];
+        
+        List<SBQQ__QuoteLine__c> quoteLines = [SELECT Id, SBQQ__Quote__r.SBQQ__Opportunity2__c, SBQQ__Quantity__c, 
+                                               SBQQ__Product__c, SBQQ__StartDate__c, SBQQ__EndDate__c
+                                               FROM SBQQ__QuoteLine__c];
+        
+        List<OpportunityLineItem> oppLines = new List<OpportunityLineItem>();
+        
+        ID productID;
+        
+        for(SBQQ__QuoteLine__c qLine : quoteLines){
+            
+            productID = qLine.SBQQ__Product__c;
+            
+            system.debug('qLine: ' + qLine);
+            OpportunityLineItem oppProd = new OpportunityLineItem();
+            
+            oppProd.TotalPrice = 1500;
+            oppProd.OpportunityID = qLine.SBQQ__Quote__r.SBQQ__Opportunity2__c; 
+            oppProd.PricebookEntryID = customPrice.id;
+            oppProd.Product2Id = qLine.SBQQ__Product__c;
+            oppProd.SBQQ__QuoteLine__c = qLine.Id;
+            oppProd.Active_Checkbox__c = TRUE;
+            oppProd.ServiceEndDate__c = qLine.SBQQ__EndDate__c;
+            oppProd.ServiceDate = qLine.SBQQ__StartDate__c;
+            oppProd.Quantity = qLine.SBQQ__Quantity__c;
+            
+            system.debug('productID: '+ productID);
+            
+            oppLines.add(oppProd);       
+        }
+        
+        OpportunityLineItem oppProd2 = new OpportunityLineItem();
+        
+        
+        oppProd2.TotalPrice = 1500;
+        oppProd2.OpportunityID = oldRenewalOppID; 
+        oppProd2.PricebookEntryID = customPrice.id;
+        oppProd2.Product2Id = productID;
+        //oppProd2.SBQQ__QuoteLine__c = qLine.Id;
+        oppProd2.Active_Checkbox__c = TRUE;
+        oppProd2.ServiceEndDate__c = System.today() - 1;
+        oppProd2.ServiceDate = System.today() - 366;
+        oppProd2.Quantity = 40;
+        
+        oppLines.add(oppProd2);   
+        
+        
+        
+        insert oppLines;
+        
+        Contract districtRollupContract = new Contract(SBQQ__Opportunity__c = districtRollupOppID,
+                                                       AccountId = districtRollupOppAccountID,
+                                                       ContractTerm = 12,
+                                                       Site_License_Contract__c = TRUE,
+                                                       Status = 'Draft',
+                                                       StartDate = System.today(),
+                                                       EndDate = System.today() + 365);
+        
+        insert districtRollupContract;
+        
+
+        Contract childContract = new Contract(SBQQ__Opportunity__c = childOppID,
+                                              SBQQ__RenewalOpportunity__c = districtRollupOppID,
+                                              Site_License_Contract_Lookup__c = districtRollupContract.id,
+                                              AccountId = childOppAccountID,
+                                              ContractTerm = 12,
+                                              Status = 'Draft',
+                                              StartDate  =System.today() - 365,
+                                              EndDate = System.today());
+        
+        
+        insert childContract;
+        
+        system.debug('childContract: '+childContract);
+        
+        
+        childContract.Status = 'Activated';
+        
+        update childContract;
+        
+        update oppsToUpdate;
+        
+
+        //system.debug('quoteLines: ' + quoteLines);
+
+        system.debug('districtRollupOppID: '+ districtRollupOppID);
+        system.debug('districtRollupOppAccountID: '+ districtRollupOppAccountID);
+        system.debug('childOppID: '+ childOppID);
+        system.debug('childOppAccountID: '+ childOppAccountID);
+        system.debug('oldRenewalOppID: '+ oldRenewalOppID);
+        system.debug('oldRenewalOppAccountID: '+ oldRenewalOppAccountID);
+        
+        
+        system.debug('oppLines: ' + oppLines);
+        system.debug('districtRollupContract: ' + districtRollupContract);
+        system.debug('childAccount: ' + childAccount);
+        
+        
+        system.debug('childContract: ' + childContract);
+        
+        Set<Id> oppIds = new Set<Id>();
+        
+        oppIds.add(districtRollupOppID);
+        
+        Test.startTest();
+        Database.executeBatch(new BatchRevBucketCalc(oppIds));
+        Test.stopTest();
+        
+        
+        
+    }
+    
+    
+        public static testMethod void testBatchRevBucketCalc2(){
+        
+        //SuperAccount__c superAccount = [select id FROM SuperAccount__c WHERE Name = 'Test Super' LIMIT 1];
+        
+        Account childAccount = [SELECT ID FROM Account WHERE Name = 'Child account' LIMIT 1];
+        
+        ID districtRollupOppID;
+        ID districtRollupOppAccountID;
+        ID childOppID;
+        ID childOppAccountID;
+        ID oldRenewalOppID;
+        ID oldRenewalOppAccountID;
+
+        List<Opportunity> oppsToUpdate = new List<Opportunity>();
+        
+        List<Opportunity> oppList = [SELECT Id, AccountId, Po_Number__c FROM Opportunity];
+        
+        //system.debug('oppList: '+ oppList);
+        
+        For(Opportunity opp : oppList){
+            
+            //system.debug('opp: '+ opp);
+            
+            if(opp.Po_Number__c == 'Test oppty1'){
+                
+                districtRollupOppID = opp.id;
+                districtRollupOppAccountID = opp.AccountId;
+ 
+            }
+            
+            if(opp.Po_Number__c == 'Test oppty2'){
+                
+                childOppID = opp.id;
+                childOppAccountID = opp.AccountId;
+                opp.AccountId = childAccount.id;
+                opp.StageName = 'Purchase';
+                
+                oppsToUpdate.add(opp);
+
+            }
+            
+            if(opp.Po_Number__c == 'opp that will be renewed'){
+                
+                oldRenewalOppID = opp.id;
+                oldRenewalOppAccountID = opp.AccountId;
+                opp.StageName = 'Purchase';
+
+                oppsToUpdate.add(opp);
+                
+            }
+
+        }
+        
+        ID stdPricebook = Test.getStandardPricebookId();
+        
+        PricebookEntry customPrice = [SELECT Id FROM PricebookEntry WHERE Pricebook2Id != :stdPricebook LIMIT 1];
+        
+        List<SBQQ__QuoteLine__c> quoteLines = [SELECT Id, SBQQ__Quote__r.SBQQ__Opportunity2__c, SBQQ__Quantity__c, 
+                                               SBQQ__Product__c, SBQQ__StartDate__c, SBQQ__EndDate__c
+                                               FROM SBQQ__QuoteLine__c];
+        
+        List<OpportunityLineItem> oppLines = new List<OpportunityLineItem>();
+        
+        ID productID;
+        
+        for(SBQQ__QuoteLine__c qLine : quoteLines){
+            
+            productID = qLine.SBQQ__Product__c;
+            
+            system.debug('qLine: ' + qLine);
+            OpportunityLineItem oppProd = new OpportunityLineItem();
+            
+            oppProd.TotalPrice = 1000;
+            oppProd.OpportunityID = qLine.SBQQ__Quote__r.SBQQ__Opportunity2__c; 
+            oppProd.PricebookEntryID = customPrice.id;
+            oppProd.Product2Id = qLine.SBQQ__Product__c;
+            oppProd.SBQQ__QuoteLine__c = qLine.Id;
+            oppProd.Active_Checkbox__c = TRUE;
+            oppProd.ServiceEndDate__c = qLine.SBQQ__EndDate__c;
+            oppProd.ServiceDate = qLine.SBQQ__StartDate__c;
+            oppProd.Quantity = qLine.SBQQ__Quantity__c;
+            
+            system.debug('productID: '+ productID);
+            
+            oppLines.add(oppProd);       
+        }
+        
+        OpportunityLineItem oppProd2 = new OpportunityLineItem();
+        
+        
+        oppProd2.TotalPrice = 1500;
+        oppProd2.OpportunityID = oldRenewalOppID; 
+        oppProd2.PricebookEntryID = customPrice.id;
+        oppProd2.Product2Id = productID;
+        //oppProd2.SBQQ__QuoteLine__c = qLine.Id;
+        oppProd2.Active_Checkbox__c = TRUE;
+        oppProd2.ServiceEndDate__c = System.today() - 1;
+        oppProd2.ServiceDate = System.today() - 366;
+        oppProd2.Quantity = 40;
+        
+        oppLines.add(oppProd2);   
+            
+            
+        OpportunityLineItem oppProd3 = new OpportunityLineItem();
+        
+        
+        oppProd3.TotalPrice = 1500;
+        oppProd3.OpportunityID = districtRollupOppID; 
+        oppProd3.PricebookEntryID = customPrice.id;
+        oppProd3.Product2Id = productID;
+        //oppProd2.SBQQ__QuoteLine__c = qLine.Id;
+        oppProd3.Active_Checkbox__c = TRUE;
+        oppProd3.ServiceEndDate__c = System.today() + 35;
+        oppProd3.ServiceDate = System.today() + 399;
+        oppProd3.Quantity = 40;
+        
+        oppLines.add(oppProd3);  
+        
+        
+        
+        insert oppLines;
+        
+        Contract districtRollupContract = new Contract(SBQQ__Opportunity__c = districtRollupOppID,
+                                                       AccountId = districtRollupOppAccountID,
+                                                       ContractTerm = 12,
+                                                       Site_License_Contract__c = TRUE,
+                                                       Status = 'Draft',
+                                                       StartDate = System.today(),
+                                                       EndDate = System.today() + 365);
+        
+        insert districtRollupContract;
+        
+
+        Contract childContract = new Contract(SBQQ__Opportunity__c = childOppID,
+                                              SBQQ__RenewalOpportunity__c = districtRollupOppID,
+                                              Site_License_Contract_Lookup__c = districtRollupContract.id,
+                                              AccountId = childOppAccountID,
+                                              ContractTerm = 12,
+                                              Status = 'Draft',
+                                              StartDate  =System.today() - 365,
+                                              EndDate = System.today());
+        
+        
+        insert childContract;
+        
+        system.debug('childContract: '+childContract);
+        
+        
+        childContract.Status = 'Activated';
+        
+        update childContract;
+        
+        update oppsToUpdate;
+        
+
+        //system.debug('quoteLines: ' + quoteLines);
+
+        system.debug('districtRollupOppID: '+ districtRollupOppID);
+        system.debug('districtRollupOppAccountID: '+ districtRollupOppAccountID);
+        system.debug('childOppID: '+ childOppID);
+        system.debug('childOppAccountID: '+ childOppAccountID);
+        system.debug('oldRenewalOppID: '+ oldRenewalOppID);
+        system.debug('oldRenewalOppAccountID: '+ oldRenewalOppAccountID);
+        
+        
+        system.debug('oppLines: ' + oppLines);
+        system.debug('districtRollupContract: ' + districtRollupContract);
+        system.debug('childAccount: ' + childAccount);
+        
+        
+        system.debug('childContract: ' + childContract);
+        
+        Set<Id> oppIds = new Set<Id>();
+        
+        oppIds.add(districtRollupOppID);
+        
+        Test.startTest();
+        Database.executeBatch(new BatchRevBucketCalc(oppIds));
+        Test.stopTest();
+        
+        
+        
+    }  
+    
+}
