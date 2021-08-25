@@ -1,0 +1,9 @@
+public class Invocable_BatchRevBucketCalc {
+    
+    @InvocableMethod(label='Re-Bucket Revenue' description='Runs BatchRevBucketCalc to calculate revenue buckets for given opp')
+    public static void bucketRevenue(List<Id> oppIds){
+        Set<Id> oppIdSet = new Set<Id>(oppIds);
+        
+        Database.executeBatch(new BatchRevBucketCalc(oppIdSet),1);
+    }
+}
