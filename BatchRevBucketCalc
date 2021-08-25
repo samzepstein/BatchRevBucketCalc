@@ -256,7 +256,7 @@ system.debug('term: '+ term);
         
         String revType = '';
         
-        Boolean isDistrictRollup;
+        Boolean isDistrictRollup = FALSE;
         
         
         if(disrictRollUpAggregate_ARR.containsKey(districtRollupKey) || disrictRollUpAggregate_ACV.containsKey(districtRollupKey)){
@@ -918,7 +918,7 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
             
             // If serviceDate is null use closedate
             // If term is null, use 12 months
-            List<OpportunityLineItem> oppLineItems = [SELECT Opportunity.CloseDate, OpportunityId, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, 
+            List<OpportunityLineItem> oppLineItems = [SELECT Opportunity.CloseDate, OpportunityId, Opportunity.Account.SuperAccount__c, Opportunity.AccountId, Adjusted_ACV_for_district_rollup__c, Adjusted_ARR__c,
                                                       Product2Id, Product2.Up_Sell_Product__c, Product2.Family, Opportunity.OwnerId,
                                                       ServiceDate, ServiceEndDate__c, TotalPrice, Contract__r.SBQQ__Opportunity__c
                                                       FROM OpportunityLineItem 
