@@ -3,6 +3,8 @@ public class BatchRevBucketCalc implements Database.Batchable<sObject>,Database.
     public Set<Id> oppIds;
     public Set<Id> renewalExpOppIds = new Set<Id>();
     public Set<Id> renewalExpOppLineItems = new Set<Id>();
+    public Map<String,Decimal> renewalExpOppLineItemsAdjustedARR_newKey = new Map<String,Decimal>();
+    public Map<String,Decimal> renewalExpOppLineItemsAdjustedACV_newKey = new Map<String,Decimal>();
     public Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR = new Map<ID,Decimal>();
     public Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV = new Map<ID,Decimal>();
     public Set<ID> districtRollUpRevBucketIds = new Set<ID>();
@@ -233,7 +235,7 @@ system.debug('term: '+ term);
         system.debug('endDate: '+ endDate);
         system.debug('closeDate: '+ closeDate);
         
-        
+
         if(startDate == Null){
             startDate = closeDate;
             endDate = startDate.addYears(1) - 1;
@@ -447,10 +449,12 @@ system.debug('term: '+ term);
             
             if(oli.Adjusted_ARR__c != NULL){
                 returnMap.put('RenExpLineItemAdjustedARR',oli.Adjusted_ARR__c);
+                returnMap.put('AdjustedARR_Key', accountId + oppId + productId);
             }
             
             if(oli.Adjusted_ACV_for_district_rollup__c != NULL){
                 returnMap.put('RenExpLineItemAdjustedACV',oli.Adjusted_ACV_for_district_rollup__c);
+                returnMap.put('AdjustedACV_Key', accountId + oppId + productId);
                 
             }
         }
@@ -975,11 +979,11 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
                             
                             if(bucketResult.containsKey('RenExpLineItemAdjustedARR')){
                                 renewalExpOppLineItemsAdjustedARR.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedARR'));
-                                
+                                renewalExpOppLineItemsAdjustedARR_newKey.put((String)bucketResult.get('AdjustedARR_Key'), (Decimal)bucketResult.get('RenExpLineItemAdjustedARR'));
                             }
                             if(bucketResult.containsKey('RenExpLineItemAdjustedACV')){
                                 renewalExpOppLineItemsAdjustedACV.put((Id)bucketResult.get('RenExpLineItem'), (Decimal)bucketResult.get('RenExpLineItemAdjustedACV'));
-                                
+                                renewalExpOppLineItemsAdjustedACV_newKey.put((String)bucketResult.get('AdjustedACV_Key'), (Decimal)bucketResult.get('RenExpLineItemAdjustedACV'));
                             }
                         }
                         
@@ -990,6 +994,8 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
                     system.debug('renewalExpOppLineItems: '+renewalExpOppLineItems);
                     system.debug('renewalExpOppLineItemsAdjustedARR: '+renewalExpOppLineItemsAdjustedARR);
                     system.debug('renewalExpOppLineItemsAdjustedACV: '+renewalExpOppLineItemsAdjustedACV);
+                    system.debug('renewalExpOppLineItemsAdjustedARR_newKey: '+renewalExpOppLineItemsAdjustedARR_newKey);
+                    system.debug('renewalExpOppLineItemsAdjustedACV_newKey: '+renewalExpOppLineItemsAdjustedACV_newKey);
                     
                     
                 }
@@ -1053,7 +1059,7 @@ system.debug('ggAccountProductResultMap: '+ ggAccountProductResultMap);
     public void finish(Database.BatchableContext BC){
         
         if(renewalExpOppIds.size() > 0){
-            Database.executeBatch(new BatchRenExpRevCalc(renewalExpOppIds,renewalExpOppLineItems,comSumMap, renewalExpOppLineItemsAdjustedARR, renewalExpOppLineItemsAdjustedACV, districtRollUpRevBucketIds),10);
+            Database.executeBatch(new BatchRenExpRevCalc(renewalExpOppIds,renewalExpOppLineItems,comSumMap, renewalExpOppLineItemsAdjustedARR, renewalExpOppLineItemsAdjustedACV, districtRollUpRevBucketIds, renewalExpOppLineItemsAdjustedARR_newKey, renewalExpOppLineItemsAdjustedACV_newKey),10);
         }
         else{
             String query = 'SELECT Id FROM Commission_Summary__c WHERE Opportunity__r.CloseDate = THIS_YEAR';
