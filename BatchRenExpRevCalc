@@ -4,6 +4,8 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
     public Set<Id> oppLineItems = new Set<Id>();
     public Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR = new Map<ID,Decimal>();
     public Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV = new Map<ID,Decimal>();
+    public Map<String,Decimal> renewalExpOppLineItemsAdjustedARR_newKey = new Map<String,Decimal>();
+    public Map<String,Decimal> renewalExpOppLineItemsAdjustedACV_newKey = new Map<String,Decimal>();
     public Set<ID> districtRollUpRevBucketIds = new Set<ID>();
     public List<String> errorLog = new List<String>();
     public Map<Id,Id> comSumMap = new Map<Id,Id>();
@@ -32,13 +34,15 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
     }
     
     
-    public BatchRenExpRevCalc(Set<Id> oppIds, Set<Id> oppLineItems, Map<Id,Id> comSumMap, Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR, Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV, Set<ID> districtRollUpRevBucketIds){
+    public BatchRenExpRevCalc(Set<Id> oppIds, Set<Id> oppLineItems, Map<Id,Id> comSumMap, Map<ID,Decimal> renewalExpOppLineItemsAdjustedARR, Map<ID,Decimal> renewalExpOppLineItemsAdjustedACV, Set<ID> districtRollUpRevBucketIds, Map<String,Decimal> renewalExpOppLineItemsAdjustedARR_newKey, Map<String,Decimal> renewalExpOppLineItemsAdjustedACV_newKey){
         this.oppIds = oppIds;
         this.oppLineItems = oppLineItems;
         this.comSumMap = comSumMap;
         this.renewalExpOppLineItemsAdjustedARR = renewalExpOppLineItemsAdjustedARR;
         this.renewalExpOppLineItemsAdjustedACV = renewalExpOppLineItemsAdjustedACV;
         this.districtRollUpRevBucketIds = districtRollUpRevBucketIds;
+        this.renewalExpOppLineItemsAdjustedARR_newKey = renewalExpOppLineItemsAdjustedARR_newKey;
+        this.renewalExpOppLineItemsAdjustedACV_newKey = renewalExpOppLineItemsAdjustedACV_newKey;
     }
     
     
@@ -167,15 +171,16 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
             
             //OPTIONAL INSTEAD OF GROUPING BY ID: create currency formula field that will have the adjusted arr if the adjusted_arr__c field is not null, else it will take the arr__c, then replace the SUM(ARR__c) with SUM(arr formual field)
             
-            List<AggregateResult> oppProducts = [SELECT Id, CALENDAR_MONTH(ServiceDate) Month, CALENDAR_YEAR(ServiceDate) Year, 
+            List<AggregateResult> oppProducts = [SELECT CALENDAR_MONTH(ServiceDate) Month, CALENDAR_YEAR(ServiceDate) Year, 
                                                  Opportunity.AccountId AccountId, OpportunityId, Product2Id ProductId, Product2.Family Family,
                                                  SUM(ARR__c) ARR, SUM(ACV__c) ACV
                                                  FROM OpportunityLineItem WHERE OpportunityId IN :batchOppIds AND Id IN :oppLineItems
-                                                 GROUP BY Id, Opportunity.AccountId, OpportunityId, Product2Id, Product2.Family,
+                                                 GROUP BY Opportunity.AccountId, OpportunityId, Product2Id, Product2.Family,
                                                  CALENDAR_MONTH(ServiceDate), CALENDAR_YEAR(ServiceDate)];
             
             //OpportunityId + Product2Id / CALENDAR_MONTH(ServiceDate)
             //formula on opportunity line item to see if oli has adjusted arr if so, aggregate that field, if not aggregate arr__c
+            
             
             System.debug('oppProducts: '+oppProducts);
             
@@ -192,6 +197,7 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
                 String family = (String)ar.get('Family');
                 String productId = (String)ar.get('ProductId');
                 String accountProdKey = (String)ar.get('AccountId')+ productId;
+                String accountId = (String)ar.get('AccountId');
                 Integer year = (Integer)ar.get('Year');
                 Integer month = (Integer)ar.get('Month');
                 Date closeDate = opp.Credited_Opportunity__c != Null ? opp.Credited_Opportunity__r.CloseDate : opp.CloseDate;
@@ -202,6 +208,7 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
                     month = closeDateMonth;
                     
                 }
+                
                 
                 System.debug('year: '+year);
                 System.debug('month: '+month);
@@ -254,7 +261,7 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
               
                 
                 //check opp line item id in oppLineItems
-                String oliID = (string)ar.get('Id');
+                //String oliID = (string)ar.get('Id');
                 
                 
                 //OLI id: 4324324 -  GG-ADM - original arr: $1000 , $200. 
@@ -262,8 +269,18 @@ public class BatchRenExpRevCalc implements Database.Batchable<sObject>, Database
                 
                 
                 //checking the adjusted arr/acv from district rollups
-                Decimal arr = renewalExpOppLineItemsAdjustedARR.containsKey(oliID) ? renewalExpOppLineItemsAdjustedARR.get(oliID) : (Decimal)ar.get('ARR');
-                Decimal acv = renewalExpOppLineItemsAdjustedACV.containsKey(oliID) ? renewalExpOppLineItemsAdjustedACV.get(oliID) : (Decimal)ar.get('ACV');
+                
+                String aggregateKey = accountId + oppId + productId;
+                
+                System.debug('aggregateKey: '+aggregateKey);
+                
+                //Decimal arr = renewalExpOppLineItemsAdjustedARR.containsKey(oliID) ? renewalExpOppLineItemsAdjustedARR.get(oliID) : (Decimal)ar.get('ARR');
+                //Decimal acv = renewalExpOppLineItemsAdjustedACV.containsKey(oliID) ? renewalExpOppLineItemsAdjustedACV.get(oliID) : (Decimal)ar.get('ACV');
+                
+                
+                Decimal arr = renewalExpOppLineItemsAdjustedARR_newKey.containsKey(aggregateKey) ? renewalExpOppLineItemsAdjustedARR_newKey.get(aggregateKey) : (Decimal)ar.get('ARR');
+                Decimal acv = renewalExpOppLineItemsAdjustedACV_newKey.containsKey(aggregateKey) ? renewalExpOppLineItemsAdjustedACV_newKey.get(aggregateKey) : (Decimal)ar.get('ACV');
+                
                 
                 System.debug('arr: '+arr);
                 System.debug('acv: '+acv);
